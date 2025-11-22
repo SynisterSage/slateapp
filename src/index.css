@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Add any global custom styles below */
+
+:root {
+  --selection-bg: #a855f7;
+}
+
+::selection {
+  background-color: var(--selection-bg);
+  color: white;
+}
