@@ -1,0 +1,5 @@
+{
+  "name": "SlateApp",
+  "description": "A swiss-army job app that parses resumes, matches skills, and tunes content for specific jobs.",
+  "requestFramePermissions": []
+}
