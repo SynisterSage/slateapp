@@ -136,18 +136,6 @@
 </head>
   <body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased h-screen overflow-hidden">
     <div id="root" class="h-full"></div>
-    <!-- Dev-only: load Tailwind CDN to match original prototype visuals while local build is finalized -->
-    <script>
-      try {
-        if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-          const s = document.createElement('script');
-          s.src = 'https://cdn.tailwindcss.com';
-          document.head.appendChild(s);
-        }
-      } catch (e) {
-        console.warn('Failed to auto-load Tailwind CDN in dev:', e);
-      }
-    </script>
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>
