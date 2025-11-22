@@ -129,18 +129,13 @@
         }
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
-  }
-}
-</script>
+  <!-- Removed importmap that forced browser to load modules from AI Studio CDN.
+       Let the dev bundler (Vite) resolve `react`, `react-dom`, and other packages
+       from local `node_modules` so the app runs consistently in local dev.
+  -->
 </head>
   <body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased h-screen overflow-hidden">
     <div id="root" class="h-full"></div>
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>
