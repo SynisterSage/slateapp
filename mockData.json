@@ -1,0 +1,107 @@
+{
+  "MOCK_RESUMES": [
+    {
+      "id": "r1",
+      "title": "Senior Frontend Engineer",
+      "fileName": "alex_dev_resume_v1.pdf",
+      "lastUpdated": "2 hours ago",
+      "personalInfo": {
+        "fullName": "Alex Developer",
+        "email": "alex@example.com",
+        "phone": "(555) 123-4567",
+        "location": "San Francisco, CA",
+        "website": "github.com/alexdev",
+        "summary": "Senior Frontend Engineer with 6+ years of experience building scalable web applications. Expert in the React ecosystem and performance optimization. Proven track record of leading teams and delivering high-impact projects."
+      },
+      "skills": [
+        { "name": "React", "level": "Expert" },
+        { "name": "TypeScript", "level": "Expert" },
+        { "name": "Node.js", "level": "Intermediate" },
+        { "name": "Tailwind CSS", "level": "Expert" }
+      ],
+      "experience": [
+        {
+          "id": "exp1",
+          "role": "Senior React Developer",
+          "company": "TechCorp Inc.",
+          "date": "2020 - Present",
+          "bullets": [
+            "Improved performance of the main dashboard.",
+            "Mentored 4 junior developers and established code quality standards.",
+            "Collaborated with UX team to redesign the onboarding flow."
+          ]
+        },
+        {
+          "id": "exp2",
+          "role": "Frontend Engineer",
+          "company": "WebSolutions LLC",
+          "date": "2017 - 2020",
+          "bullets": [
+            "Built responsive websites for 50+ clients using HTML/CSS/JS.",
+            "Integrated Stripe payments API for e-commerce projects.",
+            "Managed deployment pipelines using Jenkins."
+          ]
+        }
+      ],
+      "education": [
+        { "id": "edu1", "degree": "B.S. Computer Science", "school": "University of California", "date": "2013 - 2017" }
+      ],
+      "revisions": [
+        { "id": "rev1", "name": "Original", "createdAt": "2023-10-01", "tags": ["Base"], "contentSummary": "Standard generic resume." },
+        { "id": "rev2", "name": "Tuned for Google", "createdAt": "2023-10-05", "score": 92, "tags": ["Tuned", "AI"], "contentSummary": "Emphasized performance optimization." }
+      ],
+      "analysis": {
+        "overallScore": 78,
+        "categories": { "impact": 65, "brevity": 80, "style": 90, "ats": 75 },
+        "issues": [
+          {
+            "id": "i1",
+            "severity": "critical",
+            "category": "impact",
+            "title": "Quantify your achievements",
+            "description": "The bullet point \"Improved performance\" lacks metrics.",
+            "suggestion": "Change to \"Improved dashboard load times by 40% via code splitting.\"",
+            "fixAction": { "targetSection": "experience", "targetId": "exp1", "newContent": ["Improved dashboard load times by 40% via code splitting and memoization.", "Mentored 4 junior developers and established code quality standards.", "Collaborated with UX team to redesign the onboarding flow."] }
+          },
+          {
+            "id": "i2",
+            "severity": "warning",
+            "category": "ats",
+            "title": "Missing Keywords",
+            "description": "Your resume lacks keywords found in target job descriptions: \"CI/CD\", \"Docker\".",
+            "suggestion": "Add these to your skills or experience.",
+            "fixAction": { "targetSection": "summary", "newContent": "Senior Frontend Engineer with 6+ years of experience building scalable web applications. Expert in React, CI/CD pipelines, Docker containerization, and performance optimization." }
+          },
+          {
+            "id": "i3",
+            "severity": "info",
+            "category": "style",
+            "title": "Weak Action Verb",
+            "description": "Try changing \"Built\" to \"Architected\" or \"Engineered\".",
+            "fixAction": { "targetSection": "experience", "targetId": "exp2", "newContent": ["Architected responsive web solutions for 50+ high-profile clients.", "Integrated Stripe payments API for e-commerce projects.", "Managed deployment pipelines using Jenkins."] }
+          }
+        ]
+      }
+    },
+    {
+      "id": "r2",
+      "title": "Full Stack Experiment",
+      "fileName": "alex_fullstack_2023.pdf",
+      "lastUpdated": "2 days ago",
+      "personalInfo": { "fullName": "Alex Developer", "email": "alex@example.com", "phone": "555-0199", "location": "Remote", "website": "alex.dev", "summary": "Passionate about backend systems." },
+      "skills": [ { "name": "Python", "level": "Intermediate" }, { "name": "Django", "level": "Intermediate" } ],
+      "experience": [],
+      "education": [],
+      "revisions": [ { "id": "rev1", "name": "Original", "createdAt": "2023-09-20", "tags": ["Base"], "contentSummary": "Focus on backend technologies." } ],
+      "analysis": { "overallScore": 65, "categories": { "impact": 50, "brevity": 90, "style": 60, "ats": 60 }, "issues": [] }
+    }
+  ],
+  "MOCK_JOBS": [
+    { "id": "j1", "title": "Senior React Developer", "company": "TechFlow Systems", "location": "Remote", "matchScore": 95, "salary": "$140k - $180k", "postedAt": "1 day ago", "status": "New", "description": "We are looking for a Senior React Developer to lead our frontend team. Must have experience with micro-frontends and high-performance rendering." },
+    { "id": "j2", "title": "Frontend Engineer II", "company": "DataSphere", "location": "New York, NY", "matchScore": 88, "salary": "$130k - $160k", "postedAt": "3 days ago", "status": "New", "description": "Join our dynamic team building data visualization tools. D3.js and React expertise required." },
+    { "id": "j3", "title": "Full Stack Engineer", "company": "Startup Inc", "location": "San Francisco, CA", "matchScore": 72, "salary": "$120k - $150k", "postedAt": "5 days ago", "status": "Applied", "description": "Early stage startup looking for a generalist. React, Node, and AWS." }
+  ],
+  "MOCK_APPLICATIONS": [
+    { "id": "a1", "jobId": "j3", "resumeId": "r1", "status": "Applied", "appliedDate": "2023-10-10", "notes": "Referral from Sarah." }
+  ]
+}

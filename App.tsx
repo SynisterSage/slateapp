@@ -11,7 +11,8 @@ import { Settings } from './pages/Settings';
 import { Login } from './pages/Login';
 import { Loader } from './components/Loader';
 import { AppView } from './types';
-import { MOCK_RESUMES } from './mockData';
+import supabase, { supabaseSession } from './src/lib/supabaseClient';
+// Resumes are now loaded from Supabase via API
 
 const App = () => {
   const [currentView, setCurrentView] = useState<AppView>(AppView.DASHBOARD);
@@ -37,6 +38,57 @@ const App = () => {
     return () => clearTimeout(timer);
   }, []);
 
+  // Check existing session(s) on mount and subscribe to auth changes
+  useEffect(() => {
+    let mounted = true;
+
+    const checkSessions = async () => {
+      try {
+        const { data: localData } = await supabase.auth.getSession();
+        if (localData?.session) {
+          if (mounted) setIsAuthenticated(true);
+          return;
+        }
+
+        // Check sessionStorage-backed client too
+        if (supabaseSession && supabaseSession !== supabase) {
+          const { data: sessionData } = await supabaseSession.auth.getSession();
+          if (sessionData?.session && mounted) setIsAuthenticated(true);
+        }
+      } catch (err) {
+        console.warn('Error checking auth sessions', err);
+      }
+    };
+
+    checkSessions();
+
+    const { data: localListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN') {
+        setIsAuthenticated(true);
+        setCurrentView(AppView.DASHBOARD);
+      }
+      if (event === 'SIGNED_OUT') {
+        setIsAuthenticated(false);
+      }
+    });
+
+    const { data: sessionListener } = supabaseSession.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN') {
+        setIsAuthenticated(true);
+        setCurrentView(AppView.DASHBOARD);
+      }
+      if (event === 'SIGNED_OUT') {
+        setIsAuthenticated(false);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      try { localListener?.subscription?.unsubscribe?.(); } catch (e) {}
+      try { sessionListener?.subscription?.unsubscribe?.(); } catch (e) {}
+    };
+  }, []);
+
   // Handle Theme Change
   useEffect(() => {
     if (theme === 'dark') {
@@ -55,8 +107,17 @@ const App = () => {
   };
 
   const handleLogout = () => {
-      setIsAuthenticated(false);
-      setCurrentView(AppView.DASHBOARD);
+      // Sign out from both possible storages
+      (async () => {
+        try {
+          await supabase.auth.signOut();
+        } catch (e) { console.warn('supabase signOut error', e); }
+        try {
+          if (supabaseSession && supabaseSession !== supabase) await supabaseSession.auth.signOut();
+        } catch (e) { console.warn('supabaseSession signOut error', e); }
+        setIsAuthenticated(false);
+        setCurrentView(AppView.DASHBOARD);
+      })();
   };
 
   const handleResumeSelect = (id: string) => {
@@ -94,10 +155,9 @@ const App = () => {
       case AppView.RESUMES:
         return <Resumes onSelectResume={handleResumeSelect} onFindJobs={handleFindJobsForResume} />;
       case AppView.RESUME_DETAIL:
-        // Find the full resume object based on ID
-        const resumeToEdit = MOCK_RESUMES.find(r => r.id === selectedResumeId);
-        if (!resumeToEdit) return <Resumes onSelectResume={handleResumeSelect} />;
-        return <ResumeDetail resume={resumeToEdit} onBack={handleBackToResumes} />;
+        // Pass the selected resume id and let the detail page fetch it from the backend
+        if (!selectedResumeId) return <Resumes onSelectResume={handleResumeSelect} />;
+        return <ResumeDetail resumeId={selectedResumeId} onBack={handleBackToResumes} />;
       case AppView.JOBS:
         return <Jobs preselectedResumeId={jobSearchContextResumeId} initialApplyJobId={initialApplyJobId} />;
       case AppView.APPLICATIONS:

@@ -5,15 +5,43 @@ import {
   AlertCircle, CheckCircle2, Check, Plus, Trash2, GripVertical
 } from 'lucide-react';
 import { Resume, AnalysisIssue } from '../types';
+import { getResumeById, updateResume, createResumeRevision } from '../src/api';
+import supabase from '../src/lib/supabaseClient';
 
 interface ResumeDetailProps {
-  resume: Resume;
-  onBack: () => void;
+    resumeId: string;
+    onBack: () => void;
 }
 
-export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResume, onBack }) => {
-  // State for the resume data being edited/viewed
-  const [resumeData, setResumeData] = useState<Resume>(initialResume);
+export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) => {
+    // State for the resume data being edited/viewed
+    const [resumeData, setResumeData] = useState<Resume>({
+        id: resumeId,
+        title: 'Loading...',
+        fileName: '',
+        lastUpdated: '',
+        personalInfo: { fullName: '', email: '', phone: '', location: '', website: '', summary: '' },
+        skills: [],
+        experience: [],
+        education: [],
+        revisions: [],
+        analysis: { overallScore: 0, categories: {}, issues: [] }
+    });
+
+    // Fetch resume from Supabase when resumeId changes
+    useEffect(() => {
+        let mounted = true;
+        (async () => {
+            try {
+                const res = await getResumeById(resumeId);
+                if (!mounted) return;
+                if (res) setResumeData(res as Resume);
+            } catch (err) {
+                console.warn('Failed to load resume', err);
+            }
+        })();
+        return () => { mounted = false; };
+    }, [resumeId]);
   
   // UI State
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
@@ -26,10 +54,14 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
   const [tuneJobDesc, setTuneJobDesc] = useState('');
   const [tuneStep, setTuneStep] = useState<'input' | 'analyzing' | 'preview'>('input');
 
-  // Effect to update state if props change (e.g. switching resumes)
-  useEffect(() => {
-    setResumeData(initialResume);
-  }, [initialResume]);
+    // PDF / Parsing State
+    const [originalPdfUrl, setOriginalPdfUrl] = useState<string | null>(null);
+    const [showOriginalPdf, setShowOriginalPdf] = useState(false);
+    const [isParsing, setIsParsing] = useState(false);
+        const [parsedPreview, setParsedPreview] = useState<{ name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null>(null);
+        const [parseError, setParseError] = useState<string | null>(null);
+
+    // removed stale initialResume effect
 
   // --- Handlers ---
 
@@ -37,46 +69,47 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
       window.print();
   };
 
-  // 1. Handle AI Fix Application
-  const handleApplyFix = (issue: AnalysisIssue) => {
-    if (!issue.fixAction) return;
-    
-    setFixingIssueId(issue.id);
+    // 1. Handle AI Fix Application
+    const handleApplyFix = async (issue: AnalysisIssue) => {
+        if (!issue.fixAction) return;
+        setFixingIssueId(issue.id);
 
-    // Simulate API call delay
-    setTimeout(() => {
-        setResumeData(prev => {
-            const newData = { ...prev };
-            
-            // Apply the specific fix
-            if (issue.fixAction?.targetSection === 'experience' && issue.fixAction.targetId) {
-                newData.experience = newData.experience.map(exp => {
-                    if (exp.id === issue.fixAction?.targetId) {
-                        return { ...exp, bullets: issue.fixAction.newContent as string[] };
-                    }
-                    return exp;
-                });
-            } else if (issue.fixAction?.targetSection === 'summary') {
-                newData.personalInfo = {
-                    ...newData.personalInfo,
-                    summary: issue.fixAction.newContent as string
-                };
-            }
+        try {
+            // Apply locally for immediate feedback
+            setResumeData(prev => {
+                const newData = { ...prev };
+                if (issue.fixAction?.targetSection === 'experience' && issue.fixAction.targetId) {
+                    newData.experience = newData.experience.map(exp => exp.id === issue.fixAction?.targetId ? { ...exp, bullets: issue.fixAction.newContent as string[] } : exp);
+                } else if (issue.fixAction?.targetSection === 'summary') {
+                    newData.personalInfo = { ...newData.personalInfo, summary: issue.fixAction.newContent as string };
+                }
+                if (newData.analysis) {
+                    newData.analysis = {
+                        ...newData.analysis,
+                        overallScore: Math.min(100, (newData.analysis.overallScore || 0) + 5),
+                        issues: (newData.analysis.issues || []).filter(i => i.id !== issue.id)
+                    };
+                }
+                return newData;
+            });
 
-            // Mock: Improve score because issue was fixed
-            if (newData.analysis) {
-                newData.analysis = {
-                    ...newData.analysis,
-                    overallScore: Math.min(100, newData.analysis.overallScore + 5),
-                    issues: newData.analysis.issues.filter(i => i.id !== issue.id) // Remove fixed issue
-                };
-            }
-            
-            return newData;
-        });
-        setFixingIssueId(null);
-    }, 1200);
-  };
+            // Persist change and create a revision record
+            const rev = {
+                id: `rev_fix_${Date.now()}`,
+                name: `Fix: ${issue.id}`,
+                createdAt: new Date().toISOString(),
+                tags: ['AI Fix'],
+                contentSummary: issue.suggestion || issue.title,
+            };
+
+            await updateResume(resumeData.id, { data: { ...resumeData, lastUpdated: new Date().toISOString() } });
+            await createResumeRevision(resumeData.id, rev);
+        } catch (err) {
+            console.error('Failed to apply fix', err);
+        } finally {
+            setFixingIssueId(null);
+        }
+    };
 
   // 2. Handle Manual Edits (Deep Update)
   const handleInputChange = (section: string, field: string, value: string, id?: string) => {
@@ -117,6 +150,16 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
       }));
   };
 
+    // Save current resume to Supabase
+    const handleSave = async () => {
+        try {
+            await updateResume(resumeData.id, { data: resumeData, title: resumeData.title, lastUpdated: new Date().toISOString() });
+            console.log('Resume saved');
+        } catch (err) {
+            console.error('Save failed', err);
+        }
+    };
+
   // 3. Handle Tuning Flow
   const handleStartTune = () => {
     setTuneStep('analyzing');
@@ -125,11 +168,205 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
     }, 2000);
   };
 
-  const handleApplyTune = () => {
-    setShowTuneModal(false);
-    setTuneStep('input');
-    alert("Tuned version created! (Mock)");
+  // --- PDF Helpers ---
+  const getStoragePublicUrl = async (path: string) => {
+      // Try a few common bucket names and fall back to a signed URL if public URL isn't available.
+      const buckets = ['resumes', 'resume', 'resumes-private'];
+      for (const bucket of buckets) {
+          try {
+              // If the stored `path` contains the bucket name (e.g. "resumes/ ...") strip it
+              let objectPath = path as string;
+              const bucketPrefix = `${bucket}/`;
+              if (objectPath.startsWith(bucketPrefix)) objectPath = objectPath.slice(bucketPrefix.length);
+
+              // Try public URL first
+              const { data } = await supabase.storage.from(bucket).getPublicUrl(objectPath as string) as any;
+              // @ts-ignore
+              if (data?.publicUrl) return data.publicUrl;
+
+              // If public url not available, try a short-lived signed URL
+              try {
+                  const { data: signed, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(objectPath, 60) as any;
+                  if (signedErr) {
+                      console.warn(`createSignedUrl failed for bucket=${bucket} path=${path}`, signedErr);
+                  } else if (signed?.signedUrl) {
+                      return signed.signedUrl;
+                  }
+              } catch (err2) {
+                  console.warn(`createSignedUrl exception for bucket=${bucket} path=${path}`, err2);
+              }
+          } catch (err) {
+              console.warn(`getStoragePublicUrl exception for bucket=${bucket} path=${path}`, err);
+              // continue to next bucket
+          }
+      }
+
+      // Nothing worked — surface helpful guidance for debugging
+      const msg = `No storage bucket found for path '${path}'. Ensure the 'resumes' bucket exists in Supabase storage and that the object is present or update resume.storage_path.`;
+      console.warn(msg);
+      setParseError(msg);
+      return null;
   };
+
+  const loadOriginalPdfUrl = async (): Promise<string | null> => {
+      // Resume rows may store a `storage_path` or we can construct one from `fileName`
+      const explicitPath = (resumeData as any).storage_path;
+      // object paths in Supabase storage should be relative to the bucket (do NOT include the bucket name)
+      const constructed = resumeData.fileName ? `${resumeData.id}/${resumeData.fileName}` : null;
+      const path = explicitPath || constructed;
+      if (!path) return null;
+      const url = await getStoragePublicUrl(path);
+      if (url) setOriginalPdfUrl(url);
+      return url || null;
+  };
+
+  useEffect(() => {
+      let mounted = true;
+      (async () => {
+          // When a resume loads, if it has a file we should try to resolve the public URL and begin parsing automatically
+          try {
+              if (!resumeData) return;
+              const hasFile = Boolean((resumeData as any).storage_path || resumeData.fileName);
+              if (!hasFile) return;
+              const url = await loadOriginalPdfUrl();
+              if (!mounted) return;
+              if (url) {
+                  // show original PDF automatically when opening the studio
+                  setShowOriginalPdf(true);
+                  // start parsing immediately
+                  if (!parsedPreview) await parsePdf(url);
+              }
+          } catch (err) {
+              console.warn('Auto parse failed', err);
+          }
+      })();
+      return () => { mounted = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeData]);
+
+  const parsePdf = async (overrideUrl?: string | null) => {
+      if (isParsing) return;
+      setParseError(null);
+      setIsParsing(true);
+      try {
+          const url = overrideUrl || originalPdfUrl || ((resumeData as any).storage_path ? await getStoragePublicUrl((resumeData as any).storage_path) : (resumeData.fileName ? await getStoragePublicUrl(`resumes/${resumeData.id}/${resumeData.fileName}`) : null));
+          if (!url) throw new Error('No PDF URL available for parsing');
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error(`Failed to fetch PDF: ${resp.status}`);
+          const arrayBuffer = await resp.arrayBuffer();
+
+          // dynamically import pdfjs to avoid SSR issues
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf');
+          // set worker src to CDN (pdfjs-dist ships worker in package, but CDN is easiest)
+          // @ts-ignore
+          pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+          const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+          const pdf = await loadingTask.promise;
+          let fullText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+              // eslint-disable-next-line no-await-in-loop
+              const page = await pdf.getPage(i);
+              // eslint-disable-next-line no-await-in-loop
+              const textContent = await page.getTextContent();
+              const pageText = textContent.items.map((it: any) => (it.str ? it.str : '')).join(' ');
+              fullText += `\n${pageText}`;
+          }
+
+          // Basic extraction heuristics
+          const emailMatch = fullText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+          const phoneMatch = fullText.match(/(\+?\d[\d\-\s()]{6,}\d)/);
+          const lines = fullText.split(/\n|\r/).map((l: string) => l.trim()).filter(Boolean);
+          const nameCandidate = lines.find((l: string) => l.split(' ').length <= 5 && l.length > 3) || '';
+
+          // Try to find a Skills section
+          const skillsMatch = fullText.match(/Skills[:\-\s]*([\s\S]{0,200})/i);
+          let skillsText = '';
+          if (skillsMatch && skillsMatch[1]) {
+              skillsText = skillsMatch[1].split(/[\n,•·]/).map((s: string) => s.trim()).filter(Boolean).slice(0, 30).join(', ');
+          }
+
+          setParsedPreview({
+              name: nameCandidate,
+              email: emailMatch?.[0] || '',
+              phone: phoneMatch?.[0] || '',
+              summary: fullText.slice(0, 1000),
+              skillsText
+          });
+          // Immediately reflect parsed data in the preview (in-memory only).
+          setResumeData(prev => {
+              const newData = { ...prev } as any;
+              newData.personalInfo = {
+                  ...newData.personalInfo,
+                  fullName: nameCandidate || newData.personalInfo.fullName,
+                  email: emailMatch?.[0] || newData.personalInfo.email,
+                  phone: phoneMatch?.[0] || newData.personalInfo.phone,
+                  summary: fullText.slice(0, 1000) || newData.personalInfo.summary,
+              };
+              if (skillsText) {
+                  newData.skills = skillsText.split(',').map((s: string) => ({ name: s.trim(), level: 'Intermediate' }));
+              }
+              return newData;
+          });
+      } catch (err: any) {
+          console.error('PDF parse failed', err);
+          setParsedPreview(null);
+          setParseError(err?.message || String(err));
+      } finally {
+          setIsParsing(false);
+      }
+  };
+
+  const applyParsedData = async () => {
+      if (!parsedPreview) return;
+      const newData = { ...resumeData } as Resume & any;
+      newData.personalInfo = {
+          ...newData.personalInfo,
+          fullName: parsedPreview.name || newData.personalInfo.fullName,
+          email: parsedPreview.email || newData.personalInfo.email,
+          phone: parsedPreview.phone || newData.personalInfo.phone,
+          summary: parsedPreview.summary ? (parsedPreview.summary.slice(0, 1000)) : newData.personalInfo.summary,
+      };
+      if (parsedPreview.skillsText) {
+          newData.skills = parsedPreview.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
+      }
+
+      // Persist and create a revision
+      try {
+          await updateResume(newData.id, { data: newData, title: newData.title, lastUpdated: new Date().toISOString() });
+          const rev = {
+              id: `rev_parsed_${Date.now()}`,
+              name: 'Parsed Import',
+              createdAt: new Date().toISOString(),
+              tags: ['import', 'parsed'],
+              contentSummary: 'Initial parsed import from PDF'
+          };
+          await createResumeRevision(newData.id, rev);
+          setResumeData(newData);
+          setParsedPreview(null);
+      } catch (err) {
+          console.error('Failed to persist parsed data', err);
+      }
+  };
+
+    const handleApplyTune = async () => {
+        setShowTuneModal(false);
+        setTuneStep('input');
+        const tunedRevision = {
+            id: `rev_tuned_${Date.now()}`,
+            name: `Tuned: ${tuneJobRole || 'Job'}`,
+            createdAt: new Date().toISOString(),
+            tags: ['Tuned', 'AI'],
+            contentSummary: `Tuned for ${tuneJobRole}`
+        };
+        try {
+            await createResumeRevision(resumeData.id, tunedRevision);
+            setResumeData(prev => ({ ...prev, revisions: [...(prev.revisions || []), tunedRevision], lastUpdated: new Date().toISOString() }));
+        } catch (err) {
+            console.error('Failed to persist tuned revision', err);
+        }
+    };
 
   // --- Render Helpers ---
 
@@ -167,12 +404,25 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
                 >
                     <Wand2 size={14} /> Tune for Job
                 </button>
+                <button
+                  onClick={handleSave}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-emerald-200 transition-colors flex items-center gap-2 active:scale-95"
+                >
+                  <CheckCircle2 size={14} /> Save
+                </button>
                 <button 
                     onClick={handlePrint}
                     className="px-3 py-1.5 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
                 >
                     <Download size={14} /> Export PDF
                 </button>
+                <button
+                    onClick={() => { setShowOriginalPdf(true); if (!originalPdfUrl) loadOriginalPdfUrl(); }}
+                    className="px-3 py-1.5 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                >
+                    Original
+                </button>
+                {/* parsing is automatic on load; status shown via notification */}
                 <button 
                   onClick={() => setIsRightPanelOpen(!isRightPanelOpen)}
                   className={`p-2 rounded-lg transition-colors ${isRightPanelOpen ? 'bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-gray-800'}`}
@@ -367,20 +617,23 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
 
                                 {/* Category Bars */}
                                 <div className="grid grid-cols-2 gap-3">
-                                    {Object.entries(resumeData.analysis?.categories || {}).map(([key, val]) => (
-                                        <div key={key} className="bg-white dark:bg-gray-800 p-3 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
-                                            <div className="flex justify-between text-xs mb-2">
-                                                <span className="capitalize font-semibold text-slate-600 dark:text-gray-300">{key}</span>
-                                                <span className="font-bold text-slate-800 dark:text-white">{val}</span>
+                                    {Object.entries(resumeData.analysis?.categories || {}).map(([key, val]) => {
+                                        const scoreVal = Number(val as any) || 0;
+                                        return (
+                                            <div key={key} className="bg-white dark:bg-gray-800 p-3 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
+                                                <div className="flex justify-between text-xs mb-2">
+                                                    <span className="capitalize font-semibold text-slate-600 dark:text-gray-300">{key}</span>
+                                                    <span className="font-bold text-slate-800 dark:text-white">{scoreVal}</span>
+                                                </div>
+                                                <div className="w-full bg-slate-100 dark:bg-gray-700 h-1.5 rounded-full overflow-hidden">
+                                                    <div 
+                                                        className={`h-full rounded-full transition-all duration-500 ${scoreVal > 70 ? 'bg-emerald-500' : scoreVal > 50 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                                                        style={{ width: `${scoreVal}%` }}
+                                                    ></div>
+                                                </div>
                                             </div>
-                                            <div className="w-full bg-slate-100 dark:bg-gray-700 h-1.5 rounded-full overflow-hidden">
-                                                <div 
-                                                    className={`h-full rounded-full transition-all duration-500 ${val > 70 ? 'bg-emerald-500' : val > 50 ? 'bg-amber-500' : 'bg-red-500'}`} 
-                                                    style={{ width: `${val}%` }}
-                                                ></div>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
 
                                 {/* Issues List */}
@@ -747,6 +1000,80 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resume: initialResum
                                 <Sparkles size={18} /> Generate Tuned Resume
                             </button>
                         )}
+                    </div>
+                </div>
+            </div>
+        )}
+        {/* Original PDF Modal */}
+        {showOriginalPdf && (
+            <div className="fixed inset-0 z-60 p-6 flex items-stretch justify-center bg-black/60">
+                <div className="bg-white dark:bg-gray-900 rounded-lg w-full max-w-5xl h-[80vh] overflow-hidden flex flex-col">
+                    <div className="p-3 border-b border-slate-100 dark:border-gray-800 flex justify-between items-center">
+                        <div className="text-sm font-bold">Original PDF</div>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => setShowOriginalPdf(false)} className="px-3 py-1 rounded bg-slate-100 dark:bg-gray-800">Close</button>
+                        </div>
+                    </div>
+                    <div className="flex-1 bg-gray-100">
+                        {originalPdfUrl ? (
+                            <iframe src={originalPdfUrl} className="w-full h-full border-0" title="Original Resume PDF"></iframe>
+                        ) : (
+                            <div className="p-6 text-center text-slate-500">No public URL available for this file.</div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Parsed Preview Floating Panel */}
+        {parsedPreview && (
+            <div className="fixed right-6 bottom-6 z-50 w-96 bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800 rounded-xl shadow-xl p-4">
+                <div className="flex justify-between items-start mb-2">
+                    <div>
+                        <div className="text-sm font-bold">Parsed Preview</div>
+                        <div className="text-xs text-slate-500">Preview of fields extracted from PDF</div>
+                    </div>
+                    <button onClick={() => setParsedPreview(null)} className="text-sm text-slate-400">✕</button>
+                </div>
+                <div className="text-sm text-slate-700 dark:text-gray-300 space-y-2 mb-3 max-h-44 overflow-y-auto">
+                    <div><strong>Name:</strong> {parsedPreview.name}</div>
+                    <div><strong>Email:</strong> {parsedPreview.email}</div>
+                    <div><strong>Phone:</strong> {parsedPreview.phone}</div>
+                    <div><strong>Skills:</strong> {parsedPreview.skillsText}</div>
+                    <div className="mt-2"><strong>Summary (excerpt):</strong><div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">{parsedPreview.summary?.slice(0,500)}</div></div>
+                </div>
+                <div className="flex gap-2 justify-end">
+                    <button onClick={() => setParsedPreview(null)} className="px-3 py-2 rounded bg-slate-100 dark:bg-gray-800">Close</button>
+                    <button onClick={applyParsedData} className="px-3 py-2 rounded bg-emerald-600 text-white">Apply Parsed Data</button>
+                </div>
+            </div>
+        )}
+        {/* Parsing notification */}
+        {isParsing && (
+            <div className="fixed left-6 bottom-6 z-60 w-80 bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800 rounded-xl shadow-lg p-3 flex items-center gap-3">
+                <div className="w-9 h-9 flex items-center justify-center bg-purple-50 dark:bg-purple-900/20 rounded-full">
+                    <RefreshCw className="text-purple-600 animate-spin" size={18} />
+                </div>
+                <div className="flex-1">
+                    <div className="text-sm font-bold">Parsing resume</div>
+                    <div className="text-xs text-slate-500">We are extracting text and suggestions from the PDF.</div>
+                </div>
+                <div>
+                    <button onClick={() => setIsParsing(false)} className="text-xs text-slate-500 hover:text-slate-700">Cancel</button>
+                </div>
+            </div>
+        )}
+        {parseError && (
+            <div className="fixed right-6 top-6 z-70 w-96 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-900/30 rounded-xl shadow-lg p-3 flex items-start gap-3">
+                <div className="w-9 h-9 flex items-center justify-center bg-rose-100 dark:bg-rose-900/30 rounded-full">
+                    <svg className="w-5 h-5 text-rose-600" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 9v4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><circle cx="12" cy="16" r="1"/></svg>
+                </div>
+                <div className="flex-1">
+                    <div className="text-sm font-bold text-rose-700">Parsing failed</div>
+                    <div className="text-xs text-rose-600 mt-1">{parseError}</div>
+                    <div className="mt-2 flex gap-2 justify-end">
+                        <button onClick={() => { setParseError(null); setShowOriginalPdf(true); }} className="text-xs px-3 py-1 rounded bg-white">View Original</button>
+                        <button onClick={() => setParseError(null)} className="text-xs px-3 py-1 rounded bg-rose-600 text-white">Dismiss</button>
                     </div>
                 </div>
             </div>

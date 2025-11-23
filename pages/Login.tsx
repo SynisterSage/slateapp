@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Sparkles, UploadCloud, Wand2, Kanban, Eye, EyeOff } from 'lucide-react';
+import supabase, { supabaseSession } from '../src/lib/supabaseClient';
 
 interface LoginProps {
     onLogin: () => void;
@@ -9,6 +10,10 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [activeSlide, setActiveSlide] = useState(0);
     const [showPassword, setShowPassword] = useState(false);
+    const [email, setEmail] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [remember, setRemember] = useState(true);
 
     const slides = [
         {
@@ -85,7 +90,26 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                         </button>
                     </div>
 
-                    <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); onLogin(); }}>
+                    <form className="space-y-5" onSubmit={async (e) => { 
+                        e.preventDefault();
+                        setMessage(null);
+                        if (!email) { setMessage('Please enter an email'); return; }
+                        setLoading(true);
+                        try {
+                            // Choose the client based on "Remember me"
+                            const client = remember ? supabase : supabaseSession;
+
+                            const { data, error } = await client.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
+                            if (error) throw error;
+                            // Magic link sent — user must click the link in their email to complete sign-in.
+                            setMessage('Check your email for a sign-in link. It will return you to the app once clicked.');
+                        } catch (err: any) {
+                            console.error('Auth error', err);
+                            setMessage(err?.message || 'Auth failed');
+                        } finally {
+                            setLoading(false);
+                        }
+                    }}>
                         {!isLogin && (
                              <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Full Name</label>
@@ -94,7 +118,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                         )}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Email Address</label>
-                            <input type="email" className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-purple-500 outline-none transition-all" placeholder="name@example.com" />
+                            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-purple-500 outline-none transition-all" placeholder="name@example.com" />
                         </div>
                         <div>
                              <div className="flex justify-between mb-1.5">
@@ -119,14 +143,15 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
                         {isLogin && (
                             <div className="flex items-center gap-2">
-                                <input type="checkbox" id="remember" className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+                                <input checked={remember} onChange={(e) => setRemember(e.target.checked)} type="checkbox" id="remember" className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
                                 <label htmlFor="remember" className="text-sm text-gray-500 dark:text-gray-400">Remember me</label>
                             </div>
                         )}
 
-                        <button type="submit" className="w-full py-3.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl shadow-lg shadow-purple-600/20 transition-all active:scale-95 flex items-center justify-center gap-2">
-                            {isLogin ? "Login" : "Create Account"}
+                        <button type="submit" disabled={loading} className="w-full py-3.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl shadow-lg shadow-purple-600/20 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-70">
+                            {loading ? 'Sending…' : (isLogin ? 'Send Sign-in Link' : 'Create Account')}
                         </button>
+                        {message && <p className="text-sm text-slate-600 mt-2">{message}</p>}
                     </form>
 
                     <div className="relative my-8">
@@ -134,12 +159,27 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                         <div className="relative flex justify-center text-xs uppercase"><span className="bg-white dark:bg-gray-900 px-2 text-gray-400">Or continue with</span></div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                        <button className="flex items-center justify-center gap-2 py-2.5 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm font-medium text-gray-700 dark:text-gray-200">
+                        <div className="grid grid-cols-2 gap-4">
+                        <button disabled className="flex items-center justify-center gap-2 py-2.5 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm font-medium text-gray-700 dark:text-gray-200 opacity-60" title="Facebook not configured">
                              Facebook
                         </button>
-                        <button className="flex items-center justify-center gap-2 py-2.5 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm font-medium text-gray-700 dark:text-gray-200">
-                             Google
+                        <button onClick={async () => {
+                            setMessage(null);
+                            setLoading(true);
+                            try {
+                                const client = remember ? supabase : supabaseSession;
+                                const { data, error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
+                                if (error) throw error;
+                                // some providers return a URL to redirect to
+                                if ((data as any)?.url) window.location.href = (data as any).url;
+                            } catch (err: any) {
+                                console.error('Google OAuth error', err);
+                                setMessage(err?.message || 'Google sign-in failed');
+                            } finally {
+                                setLoading(false);
+                            }
+                        }} className="flex items-center justify-center gap-2 py-2.5 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm font-medium text-gray-700 dark:text-gray-200">
+                             Sign in with Google
                         </button>
                     </div>
                 </div>

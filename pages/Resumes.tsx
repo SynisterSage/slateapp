@@ -2,7 +2,8 @@
 
 import React, { useState, useRef } from 'react';
 import { UploadCloud, FileText, MoreVertical, Loader2, LayoutGrid, List, Briefcase, Trash2, Copy, PenLine, Download, CheckCircle2, AlertTriangle, Clock, Search, X, FileUp, ShieldCheck, ArrowRight } from 'lucide-react';
-import { MOCK_RESUMES } from '../mockData';
+import supabase from '../src/lib/supabaseClient';
+import { getResumes } from '../src/api';
 import { Resume } from '../types';
 
 interface ResumesProps {
@@ -11,8 +12,8 @@ interface ResumesProps {
 }
 
 export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) => {
-  const [isUploading, setIsUploading] = useState(false);
-  const [resumes, setResumes] = useState(MOCK_RESUMES);
+    const [isUploading, setIsUploading] = useState(false);
+    const [resumes, setResumes] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   
@@ -20,6 +21,7 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+    // Preview State removed - parsing will happen in editor
 
   // Close menu when clicking outside (handled by transparent backdrop)
   const closeMenu = (e?: React.MouseEvent) => {
@@ -44,9 +46,9 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
       setIsDraggingOver(false); // Remove overlay
       setIsUploading(true);
 
-      // Mock upload delay
-      setTimeout(() => {
-        const newResume: Resume = {
+            // Mock upload delay
+            setTimeout(async () => {
+                const newResume: Resume = {
             id: `r${Date.now()}`,
             title: file.name.replace('.pdf', ''),
             fileName: file.name,
@@ -69,8 +71,48 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                 issues: []
             }
         };
-        setResumes([newResume, ...resumes]);
-        setIsUploading(false);
+                // persist to Supabase
+                try {
+                    // Upload PDF to storage then persist a resume row that references it
+                    // Sanitize the filename for storage object naming (keep original displayed name).
+                    const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+                    // Use a path *relative to the bucket* (do not include the bucket name here)
+                    const path = `${newResume.id}/${safeFileName}`;
+                    try {
+                        // Upload via server endpoint so the service role can write to storage and persist the row
+                        const uploadUrl = `/api/upload-resume?resumeId=${encodeURIComponent(newResume.id)}&fileName=${encodeURIComponent(file.name)}`;
+                        const resp = await fetch(uploadUrl, { method: 'POST', body: file });
+                        if (!resp.ok) {
+                            const body = await resp.json().catch(() => ({}));
+                            console.error('Server upload failed', resp.status, body);
+                            alert('Upload failed on server. Check dev-server logs.');
+                        } else {
+                            const body = await resp.json();
+                            // If server returned the persisted row, use it directly (avoids anon RLS issues)
+                            if (body && body.row) {
+                                const row = body.row;
+                                const rowData = row.data ? row.data : row;
+                                setResumes([rowData, ...resumes]);
+                            } else {
+                                // Fallback: try to fetch via client API
+                                const api = await import('../src/api');
+                                try {
+                                    const fetched = await api.getResumeById(newResume.id);
+                                    setResumes([fetched, ...resumes]);
+                                } catch (fetchErr) {
+                                    console.warn('Failed to fetch persisted resume after upload', fetchErr);
+                                }
+                            }
+                            // No client-side parse step needed; server returns parsed revision when available
+                        }
+                    } catch (e) {
+                        console.error('Upload to server failed', e);
+                        alert('Upload failed. See console for details.');
+                    }
+                } catch (err) {
+                    console.error('Failed to persist resume', err);
+                }
+                setIsUploading(false);
     }, 1500);
   };
 
@@ -104,7 +146,11 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this resume?')) {
-        setResumes(resumes.filter(r => r.id !== id));
+                // delete from supabase
+                supabase.from('resumes').delete().eq('id', id).then(({ error }) => {
+                    if (error) console.error('Delete resume error', error);
+                });
+                setResumes(resumes.filter(r => r.id !== id));
         setActiveMenuId(null);
     }
   };
@@ -118,7 +164,10 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
         fileName: resume.fileName.replace('.pdf', '_copy.pdf'),
         lastUpdated: 'Just now'
     };
-    setResumes([newResume, ...resumes]);
+        supabase.from('resumes').upsert({ id: newResume.id, data: newResume }).then(({ error }) => {
+            if (error) console.error('Duplicate error', error);
+        });
+        setResumes([newResume, ...resumes]);
     setActiveMenuId(null);
   };
 
@@ -126,10 +175,30 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
       e.stopPropagation();
       const name = prompt("Enter new name:");
       if (name) {
-          setResumes(resumes.map(r => r.id === id ? { ...r, title: name } : r));
+                    const updated = resumes.map(r => r.id === id ? { ...r, title: name } : r);
+                    const target = updated.find(r => r.id === id);
+                    if (target) supabase.from('resumes').upsert({ id: target.id, data: target }).then(({ error })=> { if (error) console.error(error); });
+                    setResumes(updated);
       }
       setActiveMenuId(null);
   };
+
+    // Load resumes from Supabase on mount
+    React.useEffect(() => {
+        let mounted = true;
+        (async () => {
+            try {
+                const data = await getResumes();
+                if (!mounted) return;
+                // data is array of rows; each row may be { id, data }
+                const rows = (data || []).map((r: any) => (r.data ? r.data : r));
+                setResumes(rows);
+            } catch (err) {
+                console.warn('Failed to load resumes', err);
+            }
+        })();
+        return () => { mounted = false; };
+    }, []);
 
   const handleDownload = (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -202,6 +271,8 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
           </div>
       );
   };
+
+  
 
   return (
     <div 

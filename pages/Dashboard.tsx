@@ -4,8 +4,8 @@ import {
     Briefcase, FileText, TrendingUp, Clock, MapPin, MoreHorizontal,
     Bell, ArrowUpRight, Sparkles, Bookmark, CheckCircle2, Calendar, Plus, Search
 } from 'lucide-react';
-import { MOCK_JOBS, MOCK_APPLICATIONS, MOCK_RESUMES } from '../mockData';
 import { AppView } from '../types';
+import { getResumes, getApplications, searchJobs } from '../src/api';
 
 interface DashboardProps {
   onNavigate: (view: AppView) => void;
@@ -13,15 +13,18 @@ interface DashboardProps {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuickApply }) => {
-  // Local interaction state for the dashboard mockups
+    // Local interaction state for the dashboard
   const [savedJobs, setSavedJobs] = useState<Set<string>>(new Set());
   const [appliedJobs, setAppliedJobs] = useState<Set<string>>(new Set());
+    const [resumes, setResumes] = useState<any[]>([]);
+    const [applications, setApplications] = useState<any[]>([]);
+    const [jobs, setJobs] = useState<any[]>([]);
 
   // Derived Metrics
-  const totalApplications = MOCK_APPLICATIONS.length + appliedJobs.size;
-  const activeInterviews = MOCK_APPLICATIONS.filter(a => a.status === 'Interviewing').length;
-  const totalResumes = MOCK_RESUMES.length;
-  const newMatches = MOCK_JOBS.filter(j => j.matchScore > 85).length;
+    const totalApplications = applications.length + appliedJobs.size;
+    const activeInterviews = applications.filter(a => a.status === 'Interviewing').length;
+    const totalResumes = resumes.length;
+    const newMatches = jobs.filter(j => (j.matchScore || 0) > 85).length;
 
   const nextInterview = {
       company: 'TechFlow Systems',
@@ -45,6 +48,29 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuickApply }
       e.stopPropagation();
       onQuickApply(id);
   };
+
+    React.useEffect(() => {
+        let mounted = true;
+        (async () => {
+            try {
+                const r = await getResumes();
+                const rows = (r || []).map((x: any) => (x.data ? x.data : x));
+                if (!mounted) return;
+                setResumes(rows);
+
+                const apps = await getApplications();
+                if (!mounted) return;
+                setApplications(apps || []);
+
+                const js = await searchJobs('');
+                if (!mounted) return;
+                setJobs(js || []);
+            } catch (err) {
+                console.warn('Dashboard data load error', err);
+            }
+        })();
+        return () => { mounted = false; };
+    }, []);
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8 animate-fade-in pb-20">
@@ -175,7 +201,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuickApply }
                     </button>
                 </div>
                 <div className="grid grid-cols-1 gap-4">
-                    {MOCK_JOBS.slice(0, 3).map((job, idx) => {
+                    {(jobs || []).slice(0, 3).map((job, idx) => {
                          const isSaved = savedJobs.has(job.id);
                          const isApplied = appliedJobs.has(job.id) || job.status === 'Applied';
 
@@ -205,7 +231,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuickApply }
                                 </div>
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex gap-2">
-                                        {['React', 'TypeScript', 'Node.js'].map((skill, i) => (
+                                        {((job.tags && job.tags.length) ? job.tags.slice(0, 4) : ['General']).map((skill: string, i: number) => (
                                             <span key={i} className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 rounded-md font-medium">
                                                 {skill}
                                             </span>

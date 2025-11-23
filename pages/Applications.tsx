@@ -6,8 +6,8 @@ import {
     Clock, MessageSquare, ArrowRight, Mail, ChevronRight, ExternalLink,
     MoreHorizontal, Loader2, AlertCircle, X, Download
 } from 'lucide-react';
-import { MOCK_APPLICATIONS, MOCK_JOBS, MOCK_RESUMES } from '../mockData';
 import { Application, Job, Resume } from '../types';
+import { getApplications, getResumes, createApplication, updateApplication, deleteApplicationById } from '../src/api';
 
 // Type helper for the view
 interface HydratedApplication extends Application {
@@ -79,22 +79,30 @@ export const Applications = () => {
     const [activeStatusFilters, setActiveStatusFilters] = useState<Set<string>>(new Set());
     const [tempStatusFilters, setTempStatusFilters] = useState<Set<string>>(new Set());
 
-    // --- Data Loading & Simulation ---
-    
-    const loadData = () => {
-        // Simulate fetching and joining data
-        const allAppsRaw = [...MOCK_APPLICATIONS, ...EXTRA_MOCK_APPS];
-        const hydrated = allAppsRaw.map(app => {
-            const job = MOCK_JOBS.find(j => j.id === app.jobId) || MOCK_JOBS[0]; // Fallback for mock safety
-            const resume = MOCK_RESUMES.find(r => r.id === app.resumeId) || MOCK_RESUMES[0];
-            return { ...app, job, resume };
-        });
-        setApplications(hydrated);
-        setIsLoading(false);
-    };
+    // --- Data Loading from Supabase ---
 
     useEffect(() => {
-        loadData();
+        let mounted = true;
+        (async () => {
+            try {
+                const apps = await getApplications();
+                const resumes = await getResumes();
+                const resumeRows = (resumes || []).map((r: any) => (r.data ? r.data : r));
+                const hydrated = (apps || []).map((a: any) => {
+                    const appData = a.data || a;
+                    const job = appData.raw?.job || appData.job || { id: appData.jobId || 'unknown', title: appData.job_title || 'Unknown', company: appData.company || 'Unknown', location: appData.location || '' };
+                    const resume = resumeRows.find((r: any) => r.id === (a.resume_id || appData.resumeId)) || resumeRows[0] || { id: 'unknown', title: 'Unknown' };
+                    return { ...a, job, resume } as HydratedApplication;
+                });
+                if (!mounted) return;
+                setApplications(hydrated);
+            } catch (err) {
+                console.warn('Failed to load applications', err);
+            } finally {
+                setIsLoading(false);
+            }
+        })();
+        return () => { mounted = false; };
     }, []);
 
     const handleSync = () => {
@@ -103,18 +111,30 @@ export const Applications = () => {
         setTimeout(() => {
             setIsSyncing(false);
             // Mock: Add a new 'Interviewing' item found via email
-            const newApp: HydratedApplication = {
+            const sampleJob = applications[0]?.job || { id: 'j_sample', title: 'Sample Role', company: 'Company', location: 'Remote' };
+            const sampleResume = applications[0]?.resume || { id: 'r_sample', title: 'Sample Resume' };
+            const newAppPayload = {
                 id: `a_sync_${Date.now()}`,
-                jobId: 'j3',
-                resumeId: 'r1',
+                jobId: sampleJob.id,
+                resumeId: sampleResume.id,
                 status: 'Interviewing',
-                appliedDate: 'Just now',
+                appliedDate: new Date().toISOString(),
                 notes: 'Auto-detected from email subject "Interview Request"',
-                job: MOCK_JOBS[2],
-                resume: MOCK_RESUMES[0]
+                // Optionally store a raw job snapshot so UI can hydrate later
+                raw: { job: sampleJob }
             };
-            setApplications(prev => [newApp, ...prev]);
-            alert("Sync Complete: Found 1 new update from your inbox.");
+            // Persist to Supabase and update UI
+            (async () => {
+                try {
+                    const created = await createApplication(newAppPayload);
+                    const hydrated: HydratedApplication = { ...(created as any), job: sampleJob, resume: sampleResume };
+                    setApplications(prev => [hydrated, ...prev]);
+                    alert("Sync Complete: Found 1 new update from your inbox.");
+                } catch (err) {
+                    console.error('Sync persist error', err);
+                    alert('Sync failed to persist. See console for details.');
+                }
+            })();
         }, 2000);
     };
 
@@ -130,12 +150,28 @@ export const Applications = () => {
         if (selectedApp?.id === appId) {
             setSelectedApp(prev => prev ? { ...prev, status: newStatus } : null);
         }
+        // Persist change
+        (async () => {
+            try {
+                await updateApplication(appId, { status: newStatus });
+            } catch (err) {
+                console.error('Failed to update application status', err);
+            }
+        })();
     };
 
     const handleDelete = (appId: string) => {
         if (confirm('Are you sure you want to remove this application?')) {
-            setApplications(prev => prev.filter(a => a.id !== appId));
-            setSelectedApp(null);
+            // Persist delete
+            (async () => {
+                try {
+                    await deleteApplicationById(appId);
+                } catch (err) {
+                    console.error('Failed to delete application', err);
+                }
+                setApplications(prev => prev.filter(a => a.id !== appId));
+                setSelectedApp(null);
+            })();
         }
     };
 

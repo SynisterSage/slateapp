@@ -6,7 +6,8 @@ import {
     Briefcase, ChevronRight, Sparkles, Globe, ArrowRight, Loader2,
     FileText, ChevronDown, Frown
 } from 'lucide-react';
-import { MOCK_JOBS, MOCK_RESUMES } from '../mockData';
+// Jobs and resumes now come from providers and Supabase
+import { searchJobs as apiSearchJobs, getResumes } from '../src/api';
 import { Job } from '../types';
 
 interface JobsProps {
@@ -22,13 +23,15 @@ interface FilterState {
 
 export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJobId }) => {
     // --- State ---
-    const [jobs, setJobs] = useState<Job[]>(MOCK_JOBS);
+    const [jobs, setJobs] = useState<Job[]>([]);
     const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
+    const [isLoadingJobs, setIsLoadingJobs] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [isFilterOpen, setIsFilterOpen] = useState(false);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [savedJobIds, setSavedJobIds] = useState<Set<string>>(new Set());
+    const [resumes, setResumes] = useState<any[]>([]);
     
     // Filter State
     const [activeFilters, setActiveFilters] = useState<FilterState>({
@@ -56,10 +59,52 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
         }
     }, [preselectedResumeId]);
 
+    // Debounced job search (uses provider order: Muse -> Adzuna -> Remotive)
+    const searchTimeout = React.useRef<number | null>(null);
+
+    const doSearch = async (q: string) => {
+        setIsLoadingJobs(true);
+        try {
+            const results = await apiSearchJobs(q || '');
+            if (Array.isArray(results) && results.length) setJobs(results as Job[]);
+            else setJobs([]);
+        } catch (err) {
+            console.warn('Job search failed', err);
+            setJobs([]);
+        } finally {
+            setIsLoadingJobs(false);
+        }
+    };
+
+    useEffect(() => {
+        // initial load
+        doSearch('');
+                // load resumes for selector
+                (async () => {
+                    try {
+                        const data = await getResumes();
+                        const rows = (data || []).map((r: any) => (r.data ? r.data : r));
+                        setResumes(rows);
+                    } catch (err) {
+                        console.warn('Failed to load resumes', err);
+                        setResumes([]);
+                    }
+                })();
+        return () => {
+            if (searchTimeout.current) window.clearTimeout(searchTimeout.current);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (searchTimeout.current) window.clearTimeout(searchTimeout.current);
+        searchTimeout.current = window.setTimeout(() => doSearch(searchTerm), 500);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchTerm]);
+
     // Initialize Apply Modal from prop if present
     useEffect(() => {
         if (initialApplyJobId) {
-            setApplicationResumeId(activeResumeId !== 'all' ? activeResumeId : MOCK_RESUMES[0].id);
+            setApplicationResumeId(activeResumeId !== 'all' ? activeResumeId : (resumes[0]?.id || ''));
             setConfirmingJobId(initialApplyJobId);
         }
     }, [initialApplyJobId, activeResumeId]);
@@ -107,7 +152,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
 
     const initiateApply = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        setApplicationResumeId(activeResumeId !== 'all' ? activeResumeId : MOCK_RESUMES[0].id);
+        setApplicationResumeId(activeResumeId !== 'all' ? activeResumeId : (resumes[0]?.id || ''));
         setConfirmingJobId(id);
     };
 
@@ -196,7 +241,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                     onChange={(e) => setApplicationResumeId(e.target.value)}
                                     className="w-full appearance-none bg-slate-50 dark:bg-gray-900 border border-slate-200 dark:border-gray-700 text-slate-700 dark:text-gray-200 rounded-xl py-3 pl-4 pr-10 font-medium focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none"
                                 >
-                                    {MOCK_RESUMES.map(r => (
+                                    {resumes.map(r => (
                                         <option key={r.id} value={r.id}>{r.title} ({r.lastUpdated})</option>
                                     ))}
                                 </select>
@@ -352,9 +397,9 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                             <h4 className="text-sm font-bold text-purple-900 dark:text-purple-300">AI Match Analysis</h4>
                             <span className="ml-auto text-xs font-bold bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full">{selectedJob.matchScore}% Match</span>
                          </div>
-                         <p className="text-xs text-purple-800 dark:text-purple-300 leading-relaxed">
-                            Your resume is a strong fit for this role. Your experience with <strong>React</strong> and <strong>Node.js</strong> aligns perfectly. Consider emphasizing your <strong>System Design</strong> skills in the cover letter.
-                         </p>
+                                 <p className="text-xs text-purple-800 dark:text-purple-300 leading-relaxed">
+                                     Your resume is a strong fit for this role. Your experience with <strong>{(selectedJob.tags && selectedJob.tags[0]) || 'relevant technologies'}</strong>{selectedJob.tags && selectedJob.tags.length > 1 ? ` and ${selectedJob.tags[1]}` : ''} aligns well. Consider emphasizing your <strong>{(selectedJob.tags && selectedJob.tags.includes('System Design')) ? 'System Design' : 'architecture'}</strong> skills in the cover letter.
+                                 </p>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 mb-8">
@@ -490,7 +535,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                      >
                          <option value="all">General Search (All)</option>
                          <optgroup label="Match with Resume">
-                             {MOCK_RESUMES.map(r => (
+                             {resumes.map(r => (
                                  <option key={r.id} value={r.id}>{r.title}</option>
                              ))}
                          </optgroup>
@@ -498,11 +543,11 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                      <ChevronDown className={`absolute right-3 top-3 pointer-events-none ${activeResumeId !== 'all' ? "text-purple-500 dark:text-purple-400" : "text-slate-400 dark:text-gray-500"}`} size={16} />
                 </div>
 
-                <div className="flex-1 relative">
+                        <div className="flex-1 relative">
                     <Search className="absolute left-3 top-3 text-slate-400 dark:text-gray-500" size={20} />
                     <input 
                         type="text" 
-                        placeholder={activeResumeId !== 'all' ? `Searching best matches for ${MOCK_RESUMES.find(r=>r.id===activeResumeId)?.title}...` : "Search for roles, companies, or keywords..."}
+                        placeholder={activeResumeId !== 'all' ? `Searching best matches for ${resumes.find(r=>r.id===activeResumeId)?.title || 'selected resume'}...` : "Search for roles, companies, or keywords..."}
                         className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all placeholder:text-slate-400 dark:placeholder:text-gray-500"
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
@@ -530,7 +575,15 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
 
             {/* Job List */}
              <div className="flex-1 overflow-y-auto min-h-0 pb-20">
-                {filteredJobs.length === 0 ? (
+                {isLoadingJobs ? (
+                    <div className="flex flex-col items-center justify-center py-24 text-center">
+                        <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-gray-800 flex items-center justify-center mb-4">
+                            <Loader2 className="animate-spin text-slate-500" size={28} />
+                        </div>
+                        <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1">Loading jobs…</h3>
+                        <p className="text-slate-500 dark:text-gray-400">Querying your configured providers (Muse / Adzuna / Remotive)</p>
+                    </div>
+                ) : filteredJobs.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 text-center">
                         <div className="w-20 h-20 bg-slate-100 dark:bg-gray-800 rounded-full flex items-center justify-center mb-6">
                             <Frown size={40} className="text-slate-400 dark:text-gray-500" />

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "node server/dev-server.js",
     "build": "vite build",
     "preview": "vite preview",
     "build:css": "tailwindcss -i ./src/index.css -o ./dist/tailwind.css --minify"
@@ -13,7 +14,14 @@
     "lucide-react": "^0.554.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "@supabase/supabase-js": "^2.24.0"
+    "@supabase/supabase-js": "^2.24.0",
+    "pdfjs-dist": "^2.16.105",
+    "pdf-parse": "^1.1.1"
+  },
+  "dependenciesMeta": {
+    "pdf-parse": {
+      "optional": false
+    }
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
