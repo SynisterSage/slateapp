@@ -80,7 +80,18 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                     const path = `${newResume.id}/${safeFileName}`;
                     try {
                         // Upload via server endpoint so the service role can write to storage and persist the row
-                        const uploadUrl = `/api/upload-resume?resumeId=${encodeURIComponent(newResume.id)}&fileName=${encodeURIComponent(file.name)}`;
+                        // Include current user's uid as `owner` so server can set the owner column (avoids null owner rows)
+                        let ownerUid: string | null = null;
+                        try {
+                            const userRes: any = await supabase.auth.getUser();
+                            const user = userRes && userRes.data ? userRes.data.user : null;
+                            if (user && user.id) ownerUid = user.id;
+                        } catch (e) {
+                            // ignore - proceed without owner
+                        }
+                        const qs = new URLSearchParams({ resumeId: newResume.id, fileName: file.name });
+                        if (ownerUid) qs.set('owner', ownerUid);
+                        const uploadUrl = `/api/upload-resume?${qs.toString()}`;
                         const resp = await fetch(uploadUrl, { method: 'POST', body: file });
                         if (!resp.ok) {
                             const body = await resp.json().catch(() => ({}));
@@ -92,13 +103,28 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                             if (body && body.row) {
                                 const row = body.row;
                                 const rowData = row.data ? row.data : row;
-                                setResumes([rowData, ...resumes]);
+                                // Use functional update to avoid stale closure over `resumes`
+                                setResumes(prev => [rowData, ...prev]);
+                                // Invalidate getResumes cache so other components will refetch
+                                try { (globalThis as any)._slate_resumes_cache = null; } catch (e) {}
                             } else {
-                                // Fallback: try to fetch via client API
-                                const api = await import('../src/api');
+                                // Fallback: try to fetch the persisted row directly from the server proxy
                                 try {
-                                    const fetched = await api.getResumeById(newResume.id);
-                                    setResumes([fetched, ...resumes]);
+                                    console.debug('Upload response missing row; trying server proxy /api/get-resume');
+                                    const resp2 = await fetch(`/api/get-resume?id=${encodeURIComponent(newResume.id)}`);
+                                    if (resp2.ok) {
+                                        const j2 = await resp2.json();
+                                        const fetched = j2.row || j2;
+                                        const rowData = fetched && fetched.data ? fetched.data : fetched;
+                                        if (rowData) {
+                                            setResumes(prev => [rowData, ...prev]);
+                                            try { (globalThis as any)._slate_resumes_cache = null; } catch (e) {}
+                                        } else {
+                                            console.warn('Server proxy returned no row for uploaded resume', j2);
+                                        }
+                                    } else {
+                                        console.warn('Server proxy /api/get-resume failed', resp2.status);
+                                    }
                                 } catch (fetchErr) {
                                     console.warn('Failed to fetch persisted resume after upload', fetchErr);
                                 }
@@ -112,7 +138,7 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                 } catch (err) {
                     console.error('Failed to persist resume', err);
                 }
-                setIsUploading(false);
+                                                                setIsUploading(false);
     }, 1500);
   };
 
@@ -143,17 +169,59 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
       }
   };
 
-  const handleDelete = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    if (confirm('Are you sure you want to delete this resume?')) {
-                // delete from supabase
-                supabase.from('resumes').delete().eq('id', id).then(({ error }) => {
-                    if (error) console.error('Delete resume error', error);
-                });
-                setResumes(resumes.filter(r => r.id !== id));
-        setActiveMenuId(null);
-    }
-  };
+    const handleDelete = async (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        if (!confirm('Are you sure you want to delete this resume?')) return;
+
+        // Try client delete first but request the deleted row back with `.select()` so
+        // we can confirm whether the delete actually removed a row (RLS may block it).
+        try {
+            const { data: deleted, error } = await supabase.from('resumes').delete().eq('id', id).select();
+            if (error) {
+                console.warn('Client delete returned error, falling back to server proxy', error);
+            }
+
+            if (Array.isArray(deleted) && deleted.length > 0) {
+                // Delete confirmed — update UI
+                setResumes(prev => prev.filter(r => r.id !== id));
+                setActiveMenuId(null);
+                // Invalidate cache so list refreshes elsewhere
+                try { (globalThis as any)._slate_resumes_cache = null; } catch (e) {}
+                return;
+            }
+        } catch (e) {
+            console.warn('Client delete threw, will attempt server proxy', e);
+        }
+
+        // If we reach here, client-side delete didn't remove the row — use server proxy
+        try {
+            const resp = await fetch(`/api/delete-resume?id=${encodeURIComponent(id)}`, { method: 'POST' });
+            if (!resp.ok) {
+                const text = await resp.text().catch(() => '');
+                console.error('Server proxy delete failed', resp.status, text);
+                alert('Delete failed. See console for details.');
+                return;
+            }
+            const json = await resp.json();
+            console.debug('Server proxy delete succeeded', json);
+            // Refresh full list to reflect server state
+            try {
+                const api = await import('../src/api');
+                const refreshed = await api.getResumes();
+                const rows = (refreshed || []).map((r:any) => (r.data ? r.data : r));
+                setResumes(rows);
+            } catch (fetchErr) {
+                console.warn('Failed to refresh resumes after server delete', fetchErr);
+                // still optimistically remove from UI
+                setResumes(prev => prev.filter(r => r.id !== id));
+            }
+            setActiveMenuId(null);
+            try { (globalThis as any)._slate_resumes_cache = null; } catch (e) {}
+        } catch (err) {
+            console.error('Server proxy delete threw', err);
+            alert('Delete failed. See console.');
+        }
+    };
 
   const handleDuplicate = (e: React.MouseEvent, resume: Resume) => {
     e.stopPropagation();
@@ -198,6 +266,66 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
             }
         })();
         return () => { mounted = false; };
+    }, []);
+
+    // Listen for external updates (e.g. parsed import applied in the editor)
+    React.useEffect(() => {
+        const handler = async (e: any) => {
+            try {
+                console.debug('[resumes:updated] event received', e && e.detail);
+                const detail = e && e.detail ? e.detail : null;
+                const id = detail && detail.id ? detail.id : null;
+                // If the event included the full row, use it directly (no network)
+                if (detail && detail.row) {
+                    const rowData = detail.row;
+                    setResumes(prev => {
+                        const filtered = (prev || []).filter(r => r.id !== rowData.id);
+                        return [rowData, ...filtered];
+                    });
+                    try { (globalThis as any)._slate_resumes_cache = null; } catch (err) {}
+                    return;
+                }
+
+                if (!id) {
+                    console.debug('[resumes:updated] no id in event; refreshing full list');
+                    try { (globalThis as any)._slate_resumes_cache = null; } catch (err) {}
+                    const all = await getResumes();
+                    const rows = (all || []).map((r:any) => (r.data ? r.data : r));
+                    setResumes(rows);
+                    return;
+                }
+
+                // Try server proxy first for a consistent view (handles RLS/dev rows)
+                console.debug('[resumes:updated] fetching updated resume id=', id);
+                const resp = await fetch(`/api/get-resume?id=${encodeURIComponent(id)}`);
+                if (resp.ok) {
+                    const j = await resp.json();
+                    const fetched = j.row || j;
+                    const rowData = fetched && fetched.data ? fetched.data : fetched;
+                    if (rowData) {
+                        setResumes(prev => {
+                            const filtered = (prev || []).filter(r => r.id !== rowData.id);
+                            return [rowData, ...filtered];
+                        });
+                        try { (globalThis as any)._slate_resumes_cache = null; } catch (err) {}
+                        return;
+                    }
+                }
+                // Fallback: refresh full list
+                console.debug('[resumes:updated] server proxy failed; refreshing full list');
+                try { (globalThis as any)._slate_resumes_cache = null; } catch (err) {}
+                const all2 = await getResumes();
+                const rows2 = (all2 || []).map((r:any) => (r.data ? r.data : r));
+                setResumes(rows2);
+            } catch (err) {
+                console.warn('Failed to refresh resume after update event', err);
+            }
+        };
+
+        window.addEventListener('resumes:updated', handler as EventListener);
+        return () => {
+            window.removeEventListener('resumes:updated', handler as EventListener);
+        };
     }, []);
 
   const handleDownload = (e: React.MouseEvent) => {
@@ -355,10 +483,39 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
         ) : (
             <div className={viewMode === 'card' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8" : "flex flex-col gap-4"}>
                 {resumes.map(resume => {
-                    // Derived Data for UI
-                    const skills = resume.skills || [];
-                    const experience = resume.experience || [];
-                    const criticalIssuesCount = resume.analysis?.issues.filter(i => i.severity === 'critical').length || 0;
+                    // Create a display-only merged resume that prefers server-parsed revision data
+                    const merged = (() => {
+                        try {
+                            const base = JSON.parse(JSON.stringify(resume || {}));
+                            const revs = Array.isArray(base.revisions) ? base.revisions.slice().reverse() : [];
+                            // Find the most recent parsed revision that includes a `parsed` blob
+                            const parsedRev = revs.find((r:any) => r && (r.parsed || (r.tags && (r.tags.includes('parsed') || r.tags.includes('Auto-Parsed') || r.tags.includes('import')))));
+                            if (parsedRev && parsedRev.parsed) {
+                                const p = parsedRev.parsed;
+                                base.personalInfo = base.personalInfo || { fullName: '', email: '', phone: '', summary: '' };
+                                // Only show parsed fields if top-level seems empty or generic
+                                if (!base.personalInfo.fullName || base.personalInfo.fullName === 'New Candidate' || base.personalInfo.fullName.trim() === '') {
+                                    if (p.name) base.personalInfo.fullName = p.name;
+                                }
+                                if (!base.personalInfo.email && p.email) base.personalInfo.email = p.email;
+                                if (!base.personalInfo.phone && p.phone) base.personalInfo.phone = p.phone;
+                                if ((!base.personalInfo.summary || base.personalInfo.summary.trim() === '') && p.text) base.personalInfo.summary = (p.text || '').slice(0, 200);
+                                // Map parsed skills (comma string) into skills array if no skills exist
+                                if ((!Array.isArray(base.skills) || base.skills.length === 0) && p.skills) {
+                                    const skillList = String(p.skills || '').split(',').map((s:string) => s.trim()).filter(Boolean).slice(0, 20);
+                                    base.skills = skillList.map((s:string) => ({ name: s, level: 'Intermediate' }));
+                                }
+                            }
+                            return base;
+                        } catch (e) {
+                            return resume;
+                        }
+                    })();
+
+                    // Derived Data for UI (use merged display object)
+                    const skills = merged.skills || [];
+                    const experience = merged.experience || [];
+                    const criticalIssuesCount = merged.analysis?.issues.filter((i:any) => i.severity === 'critical').length || 0;
                     const topSkills = skills.slice(0, 3);
                     
                     // Shared Dropdown Menu
@@ -434,9 +591,9 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                                                 {resume.title}
                                             </h3>
                                             <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-gray-400">
-                                                <span className="truncate max-w-[120px]">{resume.fileName}</span>
+                                                <span className="truncate max-w-[120px]">{merged.fileName || resume.fileName}</span>
                                                 <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
-                                                <span>{resume.lastUpdated}</span>
+                                                <span>{merged.lastUpdated || resume.lastUpdated}</span>
                                             </div>
                                         </div>
 
@@ -458,10 +615,10 @@ export const Resumes: React.FC<ResumesProps> = ({ onSelectResume, onFindJobs }) 
                                         
                                         {/* Inline Status Indicator */}
                                         <div className="mt-5 pt-4 border-t border-slate-50 dark:border-gray-700 flex items-center justify-between text-xs">
-                                             <div className="flex items-center gap-2 text-slate-500 dark:text-gray-400">
-                                                <Briefcase size={12} />
-                                                <span>{experience.length} Roles</span>
-                                             </div>
+                                                            <div className="flex items-center gap-2 text-slate-500 dark:text-gray-400">
+                                                                <Briefcase size={12} />
+                                                                <span>{experience.length} Roles</span>
+                                                            </div>
                                             
                                             {criticalIssuesCount > 0 ? (
                                                 <div className="flex items-center gap-1 text-rose-600 dark:text-rose-400 font-medium">

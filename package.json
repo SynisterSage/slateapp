@@ -11,12 +11,13 @@
     "build:css": "tailwindcss -i ./src/index.css -o ./dist/tailwind.css --minify"
   },
   "dependencies": {
-    "lucide-react": "^0.554.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
     "@supabase/supabase-js": "^2.24.0",
+    "lucide-react": "^0.554.0",
+    "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^2.16.105",
-    "pdf-parse": "^1.1.1"
+    "puppeteer": "^24.31.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "dependenciesMeta": {
     "pdf-parse": {

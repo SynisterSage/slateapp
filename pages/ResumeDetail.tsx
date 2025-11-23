@@ -5,7 +5,7 @@ import {
   AlertCircle, CheckCircle2, Check, Plus, Trash2, GripVertical
 } from 'lucide-react';
 import { Resume, AnalysisIssue } from '../types';
-import { getResumeById, updateResume, createResumeRevision } from '../src/api';
+import { getResumeById, updateResume, createResumeRevision, generatePdf } from '../src/api';
 import supabase from '../src/lib/supabaseClient';
 
 interface ResumeDetailProps {
@@ -35,6 +35,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
             try {
                 const res = await getResumeById(resumeId);
                 if (!mounted) return;
+                console.debug('[ResumeDetail] fetched resume:', res);
                 if (res) setResumeData(res as Resume);
             } catch (err) {
                 console.warn('Failed to load resume', err);
@@ -42,9 +43,58 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         })();
         return () => { mounted = false; };
     }, [resumeId]);
+
+      // If the server persisted an auto-parsed revision but top-level personalInfo is empty,
+      // merge the parsed revision into local state for immediate display (do not persist automatically).
+      useEffect(() => {
+          if (!resumeData) return;
+          try {
+              const hasPersonal = resumeData.personalInfo && (String(resumeData.personalInfo.fullName || '').trim() || String(resumeData.personalInfo.email || '').trim() || String(resumeData.personalInfo.summary || '').trim());
+              if (hasPersonal) return;
+              const revs = Array.isArray(resumeData.revisions) ? resumeData.revisions : [];
+              // prefer the latest parsed/import revision
+              const parsedRev = revs.slice().reverse().find((r: any) => (r && (r.parsed || (r.tags && (r.tags.includes('parsed') || r.tags.includes('import') || r.tags.includes('Auto-Parsed'))))));
+              if (!parsedRev || !parsedRev.parsed) return;
+
+              const parsed = parsedRev.parsed;
+              // Heuristic: derive name from parsed.name, else first non-empty line of parsed.text
+              const firstLine = (rawText?: string) => {
+                  if (!rawText) return null;
+                  const lines = String(rawText).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+                  return lines.length ? lines[0] : null;
+              };
+
+              const derivedName = parsed.name || parsed.fullName || firstLine(parsed.text) || null;
+              const derivedSummary = parsed.summary || (parsed.text ? String(parsed.text).slice(0, 1000) : null);
+              const derivedEmail = parsed.email || null;
+              const derivedPhone = parsed.phone || null;
+
+              setResumeData(prev => {
+                  const newData: any = { ...(prev as any) };
+                  newData.personalInfo = {
+                      ...newData.personalInfo,
+                      fullName: derivedName || newData.personalInfo.fullName,
+                      email: derivedEmail || newData.personalInfo.email,
+                      phone: derivedPhone || newData.personalInfo.phone,
+                      summary: derivedSummary || newData.personalInfo.summary,
+                  };
+                  if (parsed.skills) {
+                      newData.skills = Array.isArray(parsed.skills) ? parsed.skills : String(parsed.skills).split(',').map((s:string) => ({ name: s.trim(), level: 'Intermediate' }));
+                  } else if (parsed.skillsText) {
+                      newData.skills = String(parsed.skillsText).split(',').map((s:string) => ({ name: s.trim(), level: 'Intermediate' }));
+                  }
+                  return newData;
+              });
+          } catch (err) {
+              console.warn('Failed to merge parsed revision into state', err);
+          }
+      }, [JSON.stringify(resumeData?.revisions || [])]);
   
-  // UI State
-  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+        // UI State
+    const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+    // Right panel dynamic width (px)
+    const [rightPanelWidth, setRightPanelWidth] = useState<number>(384);
+    const resizingRef = React.useRef<{ active: boolean; startX: number; startWidth: number }>({ active: false, startX: 0, startWidth: 384 });
   const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor'>('analysis');
   const [showTuneModal, setShowTuneModal] = useState(false);
   const [fixingIssueId, setFixingIssueId] = useState<string | null>(null);
@@ -58,12 +108,17 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     const [originalPdfUrl, setOriginalPdfUrl] = useState<string | null>(null);
     const [showOriginalPdf, setShowOriginalPdf] = useState(false);
     const [isParsing, setIsParsing] = useState(false);
-        const [parsedPreview, setParsedPreview] = useState<{ name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null>(null);
-        const [parseError, setParseError] = useState<string | null>(null);
+    const [isLayoutModalOpen, setIsLayoutModalOpen] = useState(false);
+    const [selectedLayout, setSelectedLayout] = useState<string | null>(null);
+    const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+    const [parsedPreview, setParsedPreview] = useState<{ name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null>(null);
+    const [parseError, setParseError] = useState<string | null>(null);
 
     // removed stale initialResume effect
 
   // --- Handlers ---
+    // Revision preview state
+    const [previewRevision, setPreviewRevision] = useState<any | null>(null);
 
   const handlePrint = () => {
       window.print();
@@ -146,17 +201,138 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
       const skillsList = skillsText.split(',').map(s => s.trim()).filter(s => s !== '');
       setResumeData(prev => ({
           ...prev,
-          skills: skillsList.map(s => ({ name: s, level: 'Expert' })) // Default to Expert for simple edit
+          skills: skillsList.map(s => ({ name: s, level: 'Expert' }))
       }));
   };
 
-    // Save current resume to Supabase
-    const handleSave = async () => {
+    const handleGeneratePdf = async () => {
         try {
-            await updateResume(resumeData.id, { data: resumeData, title: resumeData.title, lastUpdated: new Date().toISOString() });
-            console.log('Resume saved');
+            setIsGeneratingPdf(true);
+            const json = await generatePdf(resumeData.id);
+            const url = json && json.url ? json.url : (json && json.row && json.row.data && json.row.data.generated_pdf_path ? json.row.data.generated_pdf_path : null);
+            if (url && typeof url === 'string') {
+                // If the server returned a signed URL, open it; otherwise try to resolve via storage helper
+                if (url.startsWith('http')) {
+                    window.open(url, '_blank');
+                } else {
+                    const resolved = await getStoragePublicUrl(url);
+                    if (resolved) window.open(resolved, '_blank');
+                }
+                // Update local state if server returned the updated row
+                if (json.row) {
+                    const rowData = json.row.data ? json.row.data : json.row;
+                    setResumeData(rowData);
+                }
+            } else {
+                alert('PDF generation succeeded but no URL returned');
+            }
         } catch (err) {
-            console.error('Save failed', err);
+            console.error('Generate PDF failed', err);
+            alert('Generate PDF failed. See console for details.');
+        } finally {
+            setIsGeneratingPdf(false);
+        }
+    };
+
+    // --- New: Analysis / Suggestion / Revision helpers ---
+    const handleAnalyze = async () => {
+        try {
+            // Try server-side analyze endpoint first
+            const payload = { id: resumeData.id, data: resumeData };
+            let json: any = null;
+            try {
+                const resp = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if (resp.ok) json = await resp.json();
+            } catch (e) {
+                // ignore - we'll fall back to client-side heuristics
+            }
+
+            if (!json) {
+                // Fallback heuristic analysis (mock) so UI works without backend AI
+                const summaryLen = String(resumeData.personalInfo.summary || '').trim().length;
+                const expCount = Array.isArray(resumeData.experience) ? resumeData.experience.length : 0;
+                const skillsCount = Array.isArray(resumeData.skills) ? resumeData.skills.length : 0;
+                const overall = Math.max(30, Math.min(95, Math.round((Math.min(1200, summaryLen) / 1200) * 40 + Math.min(6, expCount) * 8 + Math.min(12, skillsCount) * 3)));
+                const categories: any = { clarity: Math.min(100, Math.round((summaryLen / 800) * 100)), experience: Math.min(100, expCount * 12), skills: Math.min(100, skillsCount * 10), formatting: 70 };
+                const issues: any[] = [];
+                if (summaryLen < 120) issues.push({ id: `issue_summary_${Date.now()}`, severity: 'major', title: 'Short Summary', description: 'Your professional summary is short; expand with achievements and impact.', suggestion: 'Add 2–3 achievement-oriented sentences quantifying impact.', fixAction: { targetSection: 'summary', newContent: (resumeData.personalInfo.summary || '') + ' Experienced professional with a track record of delivering measurable results.' } });
+                if (skillsCount < 5) issues.push({ id: `issue_skills_${Date.now()}`, severity: 'minor', title: 'Few Skills Detected', description: 'We detected fewer than 5 skills — consider adding relevant hard skills and keywords.', suggestion: 'Add role-specific keywords (e.g., GraphQL, Docker, AWS).', fixAction: null });
+                if (expCount === 0) issues.push({ id: `issue_experience_${Date.now()}`, severity: 'critical', title: 'No Experience Listed', description: 'No work experience entries found. Add roles with bullets that demonstrate outcomes.', suggestion: 'Add at least one role with 3–5 bullet points showing impact.', fixAction: null });
+                json = { overallScore: overall, categories, issues };
+            }
+
+            // Merge into resumeData.analysis
+            setResumeData(prev => ({ ...(prev as any), analysis: { overallScore: json.overallScore || json.overall || 0, categories: json.categories || json.cat || {}, issues: json.issues || json.issues || [] } } as Resume));
+            setAssistantTab('analysis');
+        } catch (err) {
+            console.error('Analysis failed', err);
+            alert('Analysis failed. See console.');
+        }
+    };
+
+    const handleSuggestRewrite = async (issue: any) => {
+        // Try server-side suggest endpoint, else local mock
+        try {
+            let json: any = null;
+            try {
+                const resp = await fetch('/api/suggest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: resumeData.id, issue, data: resumeData }) });
+                if (resp.ok) json = await resp.json();
+            } catch (e) {}
+
+            if (!json) {
+                // simple local rewrite heuristics
+                if (issue.fixAction && issue.fixAction.targetSection === 'summary') {
+                    json = { suggestion: (String(resumeData.personalInfo.summary || '').slice(0, 250) + ' Proven ability to deliver on measurable outcomes.').trim() };
+                } else if (issue.fixAction && issue.fixAction.targetSection === 'experience') {
+                    json = { suggestion: (issue.fixAction.newContent && Array.isArray(issue.fixAction.newContent) ? issue.fixAction.newContent.join('\n') : 'Improved bullet describing impact and metrics.') };
+                } else {
+                    json = { suggestion: issue.suggestion || 'Suggested improvement: emphasize measurable outcomes and add relevant keywords.' };
+                }
+            }
+
+            // Attach suggestion into issue for quick apply/preview
+            setResumeData(prev => {
+                const newData: any = { ...(prev as any) };
+                newData.analysis = { ...(newData.analysis || {}), issues: (newData.analysis?.issues || []).map((i:any) => i.id === issue.id ? { ...i, suggestionCandidates: json.candidates || [json.suggestion || json] } : i) };
+                return newData;
+            });
+        } catch (err) {
+            console.error('Suggest failed', err);
+            alert('Suggest failed. See console.');
+        }
+    };
+
+    const handleSaveRevision = async () => {
+        try {
+            const message = window.prompt('Revision message (short):', 'Save revision');
+            if (!message) return;
+            const rev = { id: `rev_${Date.now()}`, name: message, createdAt: new Date().toISOString(), tags: ['manual'], contentSummary: message, data: resumeData };
+            await createResumeRevision(resumeData.id, rev);
+            setResumeData(prev => ({ ...(prev as any), revisions: [...(prev.revisions || []), rev], lastUpdated: new Date().toISOString() }));
+            alert('Revision saved');
+        } catch (err) {
+            console.error('Save revision failed', err);
+            alert('Failed to save revision. See console.');
+        }
+    };
+
+    const openLayoutModal = () => {
+        const current = (resumeData as any).data?.pdf_layout || (resumeData as any).pdf_layout || 'classic';
+        setSelectedLayout(current);
+        setIsLayoutModalOpen(true);
+    };
+
+    const saveLayoutChoice = async () => {
+        setIsLayoutModalOpen(false);
+        try {
+            const newData = { ...resumeData } as any;
+            if (newData.data) newData.data = { ...newData.data, pdf_layout: selectedLayout };
+            else newData.pdf_layout = selectedLayout;
+            await updateResume(resumeData.id, { data: newData, lastUpdated: new Date().toISOString() });
+            setResumeData(newData as Resume);
+        } catch (err) {
+            console.error('Failed to save layout', err);
+            alert('Failed to save layout. See console for details.');
         }
     };
 
@@ -170,39 +346,58 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
   // --- PDF Helpers ---
   const getStoragePublicUrl = async (path: string) => {
-      // Try a few common bucket names and fall back to a signed URL if public URL isn't available.
-      const buckets = ['resumes', 'resume', 'resumes-private'];
-      for (const bucket of buckets) {
-          try {
-              // If the stored `path` contains the bucket name (e.g. "resumes/ ...") strip it
-              let objectPath = path as string;
-              const bucketPrefix = `${bucket}/`;
-              if (objectPath.startsWith(bucketPrefix)) objectPath = objectPath.slice(bucketPrefix.length);
+      // If the path looks like 'bucket/obj/path', prefer that bucket first
+      try {
+          if (!path) return null;
+          const parts = String(path).split('/');
+          const firstSegment = parts.length > 1 ? parts[0] : null;
+          const knownBuckets = ['resumes-generated', 'resumes', 'resume', 'resumes-private'];
+          const candidateBucket = firstSegment && knownBuckets.includes(firstSegment) ? firstSegment : null;
+          const tryBuckets = candidateBucket ? [candidateBucket, ...knownBuckets] : [...knownBuckets];
 
-              // Try public URL first
-              const { data } = await supabase.storage.from(bucket).getPublicUrl(objectPath as string) as any;
-              // @ts-ignore
-              if (data?.publicUrl) return data.publicUrl;
-
-              // If public url not available, try a short-lived signed URL
+          for (const bucket of tryBuckets) {
               try {
-                  const { data: signed, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(objectPath, 60) as any;
-                  if (signedErr) {
-                      console.warn(`createSignedUrl failed for bucket=${bucket} path=${path}`, signedErr);
-                  } else if (signed?.signedUrl) {
-                      return signed.signedUrl;
-                  }
-              } catch (err2) {
-                  console.warn(`createSignedUrl exception for bucket=${bucket} path=${path}`, err2);
-              }
-          } catch (err) {
-              console.warn(`getStoragePublicUrl exception for bucket=${bucket} path=${path}`, err);
-              // continue to next bucket
-          }
-      }
+                  let objectPath = String(path);
+                  const bucketPrefix = `${bucket}/`;
+                  if (objectPath.startsWith(bucketPrefix)) objectPath = objectPath.slice(bucketPrefix.length);
 
-      // Nothing worked — surface helpful guidance for debugging
-      const msg = `No storage bucket found for path '${path}'. Ensure the 'resumes' bucket exists in Supabase storage and that the object is present or update resume.storage_path.`;
+                  // Try public URL first
+                  const { data } = await supabase.storage.from(bucket).getPublicUrl(objectPath as string) as any;
+                  if (data?.publicUrl) return data.publicUrl;
+
+                  // Signed URL fallback (client may not have permission); try client createSignedUrl first
+                  try {
+                      const { data: signed, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(objectPath, 60) as any;
+                      if (signedErr) {
+                          console.warn(`createSignedUrl failed for bucket=${bucket} path=${path}`, signedErr);
+                      } else if (signed?.signedUrl) {
+                          return signed.signedUrl;
+                      }
+                  } catch (err2) {
+                      console.warn(`createSignedUrl exception for bucket=${bucket} path=${path}`, err2);
+                  }
+
+                  // If client couldn't create a signed URL (likely because it's anon), ask our dev server to produce one using service role
+                  try {
+                      const qs = new URLSearchParams({ path: `${bucket}/${objectPath}` });
+                      const resp = await fetch(`/api/get-signed-url?${qs.toString()}`);
+                      if (resp.ok) {
+                          const json = await resp.json();
+                          if (json && json.signedUrl) return json.signedUrl;
+                      } else {
+                          console.warn('get-signed-url returned', resp.status);
+                      }
+                  } catch (err3) {
+                      console.warn('getSignedUrl dev endpoint failed', err3);
+                  }
+              } catch (err) {
+                  // try next bucket
+              }
+          }
+      } catch (err) {
+          console.warn('getStoragePublicUrl unexpected error', err);
+      }
+      const msg = `No storage bucket found for path '${path}'. Ensure the object is present or update resume.storage_path.`;
       console.warn(msg);
       setParseError(msg);
       return null;
@@ -210,34 +405,51 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
   const loadOriginalPdfUrl = async (): Promise<string | null> => {
       // Resume rows may store a `storage_path` or we can construct one from `fileName`
-      const explicitPath = (resumeData as any).storage_path;
+      // Do NOT prefer generated_pdf_path for the editor iframe (we show original upload inline only)
+      const explicitPath = (resumeData as any).storage_path || (resumeData as any).data && (resumeData as any).data.storage_path;
       // object paths in Supabase storage should be relative to the bucket (do NOT include the bucket name)
       const constructed = resumeData.fileName ? `${resumeData.id}/${resumeData.fileName}` : null;
       const path = explicitPath || constructed;
       if (!path) return null;
       const url = await getStoragePublicUrl(path);
-      if (url) setOriginalPdfUrl(url);
+      if (url) {
+          console.debug('[ResumeDetail] resolved originalPdfUrl:', url);
+          setOriginalPdfUrl(url);
+      }
       return url || null;
   };
 
   useEffect(() => {
       let mounted = true;
       (async () => {
-          // When a resume loads, if it has a file we should try to resolve the public URL and begin parsing automatically
+          // When a resume loads, do NOT show any PDF in the main iframe by default.
+          // Instead, resolve the original upload URL for background parsing and leave the
+          // interactive parsed data visible in the main canvas. Users can explicitly
+          // open the Original upload or View Generated PDF via header controls.
           try {
               if (!resumeData) return;
-              const hasFile = Boolean((resumeData as any).storage_path || resumeData.fileName);
+
+              // Ensure we have the original upload URL available for parsing, but don't set it into the iframe.
+              const explicitPath = (resumeData as any).storage_path || (resumeData as any).data && (resumeData as any).data.storage_path;
+              const hasFile = Boolean(explicitPath || resumeData.fileName);
               if (!hasFile) return;
-              const url = await loadOriginalPdfUrl();
+
+              // Resolve original upload URL for parsing only
+              const origUrl = await loadOriginalPdfUrl();
               if (!mounted) return;
-              if (url) {
-                  // show original PDF automatically when opening the studio
-                  setShowOriginalPdf(true);
-                  // start parsing immediately
-                  if (!parsedPreview) await parsePdf(url);
+
+              // If there's no parsed/import revision yet, parse the original upload in the background
+              const hasParsedRevision = Array.isArray(resumeData.revisions) && resumeData.revisions.some((r: any) => {
+                  const tags = r && r.tags ? r.tags : [];
+                  return String(r.id || '').startsWith('rev_parsed_') || tags.includes('parsed') || tags.includes('import');
+              });
+              if (!hasParsedRevision && origUrl) {
+                  if (!parsedPreview) await parsePdf(origUrl);
+              } else {
+                  setParsedPreview(null);
               }
           } catch (err) {
-              console.warn('Auto parse failed', err);
+              console.warn('Auto load failed', err);
           }
       })();
       return () => { mounted = false; };
@@ -287,13 +499,14 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               skillsText = skillsMatch[1].split(/[\n,•·]/).map((s: string) => s.trim()).filter(Boolean).slice(0, 30).join(', ');
           }
 
-          setParsedPreview({
+          const parsedObj = {
               name: nameCandidate,
               email: emailMatch?.[0] || '',
               phone: phoneMatch?.[0] || '',
               summary: fullText.slice(0, 1000),
               skillsText
-          });
+          };
+          setParsedPreview(parsedObj);
           // Immediately reflect parsed data in the preview (in-memory only).
           setResumeData(prev => {
               const newData = { ...prev } as any;
@@ -309,6 +522,12 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               }
               return newData;
           });
+          // Persist parsed data automatically (apply parsed preview)
+          try {
+            await applyParsedData(parsedObj);
+          } catch (err) {
+            console.warn('Auto-apply parsed data failed', err);
+          }
       } catch (err: any) {
           console.error('PDF parse failed', err);
           setParsedPreview(null);
@@ -318,23 +537,36 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
       }
   };
 
-  const applyParsedData = async () => {
-      if (!parsedPreview) return;
+  async function applyParsedData(passedParsed?: { name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null) {
+      const parsed = passedParsed || parsedPreview;
+      if (!parsed) return;
+            // Prevent repeated auto-applies: if a parsed revision already exists, skip.
+            const hasParsedRevision = Array.isArray(resumeData.revisions) && resumeData.revisions.some((r: any) => {
+                const tags = r && r.tags ? r.tags : [];
+                return String(r.id || '').startsWith('rev_parsed_') || tags.includes('parsed') || tags.includes('import');
+            });
+            if (hasParsedRevision) {
+                // clear parsedPreview and bail
+                setParsedPreview(null);
+                return;
+            }
       const newData = { ...resumeData } as Resume & any;
       newData.personalInfo = {
           ...newData.personalInfo,
-          fullName: parsedPreview.name || newData.personalInfo.fullName,
-          email: parsedPreview.email || newData.personalInfo.email,
-          phone: parsedPreview.phone || newData.personalInfo.phone,
-          summary: parsedPreview.summary ? (parsedPreview.summary.slice(0, 1000)) : newData.personalInfo.summary,
+          fullName: parsed.name || newData.personalInfo.fullName,
+          email: parsed.email || newData.personalInfo.email,
+          phone: parsed.phone || newData.personalInfo.phone,
+          summary: parsed.summary ? (parsed.summary.slice(0, 1000)) : newData.personalInfo.summary,
       };
-      if (parsedPreview.skillsText) {
-          newData.skills = parsedPreview.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
+      if (parsed.skillsText) {
+          newData.skills = parsed.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
       }
 
-      // Persist and create a revision
-      try {
-          await updateResume(newData.id, { data: newData, title: newData.title, lastUpdated: new Date().toISOString() });
+          // Persist and create a revision
+          try {
+          // mark parsedImportedAt timestamp so we don't re-parse
+          (newData as any).parsedImportedAt = new Date().toISOString();
+          await updateResume(newData.id, { data: newData, title: newData.title, lastUpdated: new Date().toISOString(), parsedImportedAt: (newData as any).parsedImportedAt });
           const rev = {
               id: `rev_parsed_${Date.now()}`,
               name: 'Parsed Import',
@@ -343,12 +575,27 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               contentSummary: 'Initial parsed import from PDF'
           };
           await createResumeRevision(newData.id, rev);
-          setResumeData(newData);
-          setParsedPreview(null);
+                    setResumeData(newData);
+                    setParsedPreview(null);
+                    try {
+                        // Invalidate module-level resumes cache so list views will refetch
+                        try { (globalThis as any)._slate_resumes_cache = null; } catch (e) {}
+                        // Broadcast an event so any open list views (cards) can refresh
+                        if (typeof window !== 'undefined' && window.dispatchEvent) {
+                            try {
+                                window.dispatchEvent(new CustomEvent('resumes:updated', { detail: { id: newData.id, row: newData } }));
+                            } catch (e) {
+                                // older browsers may throw on CustomEvent construction
+                                try { (window as any).dispatchEvent(new CustomEvent('resumes:updated', { detail: { id: newData.id, row: newData } })); } catch (ee) { /* swallow */ }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to notify other views of parsed update', e);
+                    }
       } catch (err) {
           console.error('Failed to persist parsed data', err);
       }
-  };
+  }
 
     const handleApplyTune = async () => {
         setShowTuneModal(false);
@@ -377,12 +624,44 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
   const strokeDashoffset = circumference - (score / 100) * circumference;
   const scoreColor = score >= 80 ? 'text-emerald-500' : score >= 60 ? 'text-amber-500' : 'text-rose-500';
   const strokeColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#f43f5e';
+    // If previewRevision is set, derive a display data object to render instead of live resumeData
+    const displayData = React.useMemo(() => {
+        if (!previewRevision) return resumeData;
+        const rev = previewRevision;
+        if (rev.data) return rev.data;
+        // if parsed-only revision, merge parsed fields onto a copy of the current resume
+        const copy: any = { ...resumeData };
+        if (rev.parsed) {
+            copy.personalInfo = { ...copy.personalInfo, fullName: rev.parsed.name || copy.personalInfo.fullName, email: rev.parsed.email || copy.personalInfo.email, phone: rev.parsed.phone || copy.personalInfo.phone, summary: rev.parsed.summary || copy.personalInfo.summary };
+            if (rev.parsed.skills) {
+                copy.skills = Array.isArray(rev.parsed.skills) ? rev.parsed.skills : String(rev.parsed.skills).split(',').map((s:string)=>({ name: s.trim(), level: 'Intermediate' }));
+            }
+        }
+        return copy;
+    }, [previewRevision, resumeData]);
 
+    const coreSnapshot = (obj: any) => ({
+        personalInfo: obj?.personalInfo || {},
+        skills: obj?.skills || [],
+        experience: obj?.experience || [],
+        education: obj?.education || []
+    });
 
-  return (
+    const isPreviewApplied = React.useMemo(() => {
+        if (!previewRevision) return false;
+        try {
+            const previewCore = coreSnapshot(displayData as any);
+            const currentCore = coreSnapshot(resumeData as any);
+            return JSON.stringify(previewCore) === JSON.stringify(currentCore);
+        } catch (e) {
+            return false;
+        }
+    }, [previewRevision, displayData, resumeData]);
+
+    return (
     <div className="flex flex-col h-full bg-slate-100 dark:bg-gray-950 animate-fade-in relative overflow-hidden">
         {/* Top Navigation Bar */}
-        <header className="h-14 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-slate-200 dark:border-gray-800 flex items-center justify-between px-4 shrink-0 z-20 sticky top-0">
+        <header className="py-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-slate-200 dark:border-gray-800 flex items-center justify-between px-4 shrink-0 z-20 sticky top-0">
             <div className="flex items-center gap-3">
                 <button onClick={onBack} className="p-2 text-slate-500 dark:text-gray-400 hover:bg-slate-100 dark:hover:bg-gray-800 rounded-full transition-colors">
                     <ArrowLeft size={18} />
@@ -397,30 +676,41 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 </div>
             </div>
 
-            <div className="flex items-center gap-2">
-                <button 
+            <div className="flex items-center gap-2 flex-wrap">
+                                <button 
                     onClick={() => setShowTuneModal(true)}
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-purple-200 dark:shadow-none transition-colors flex items-center gap-2 active:scale-95"
+                    className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-purple-200 dark:shadow-none transition-colors flex items-center gap-2 active:scale-95 whitespace-nowrap"
                 >
                     <Wand2 size={14} /> Tune for Job
                 </button>
-                <button
-                  onClick={handleSave}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-emerald-200 transition-colors flex items-center gap-2 active:scale-95"
-                >
-                  <CheckCircle2 size={14} /> Save
-                </button>
+                                <button onClick={handleSaveRevision} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-indigo-200 transition-colors flex items-center gap-2 active:scale-95 whitespace-nowrap">
+                                    <Plus size={14} /> Save Revision
+                                </button>
                 <button 
                     onClick={handlePrint}
-                    className="px-3 py-1.5 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                    className="px-2 py-1 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
                 >
-                    <Download size={14} /> Export PDF
+                    <Download size={14} /> Print / Export
                 </button>
-                <button
-                    onClick={() => { setShowOriginalPdf(true); if (!originalPdfUrl) loadOriginalPdfUrl(); }}
-                    className="px-3 py-1.5 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                <button 
+                    onClick={() => { setPreviewRevision(null); setShowOriginalPdf(true); if (!originalPdfUrl) loadOriginalPdfUrl(); }}
+                    className="px-2 py-1 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
                 >
                     Original
+                </button>
+                
+                <button
+                    onClick={handleGeneratePdf}
+                    disabled={isGeneratingPdf}
+                    className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-emerald-200 transition-colors flex items-center gap-2 whitespace-nowrap"
+                >
+                    <RefreshCw size={14} /> {isGeneratingPdf ? 'Regenerating...' : 'Regenerate'}
+                </button>
+                <button
+                    onClick={openLayoutModal}
+                    className="px-2 py-1 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
+                >
+                    <PenTool size={14} /> Layout
                 </button>
                 {/* parsing is automatic on load; status shown via notification */}
                 <button 
@@ -431,6 +721,32 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 </button>
             </div>
         </header>
+
+        {isLayoutModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="bg-white dark:bg-gray-900 p-4 rounded shadow w-96">
+                    <h3 className="text-lg font-bold mb-2">Change PDF Layout</h3>
+                    <div className="space-y-2">
+                        <label className="flex items-center gap-2">
+                            <input type="radio" name="pdf-layout" checked={selectedLayout === 'classic'} onChange={() => setSelectedLayout('classic')} />
+                            <span className="ml-2">Classic</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                            <input type="radio" name="pdf-layout" checked={selectedLayout === 'modern'} onChange={() => setSelectedLayout('modern')} />
+                            <span className="ml-2">Modern</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                            <input type="radio" name="pdf-layout" checked={selectedLayout === 'compact'} onChange={() => setSelectedLayout('compact')} />
+                            <span className="ml-2">Compact</span>
+                        </label>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                        <button onClick={() => setIsLayoutModalOpen(false)} className="px-3 py-1 bg-white border rounded">Cancel</button>
+                        <button onClick={saveLayoutChoice} className="px-3 py-1 bg-emerald-600 text-white rounded">Save</button>
+                    </div>
+                </div>
+            </div>
+        )}
 
         {/* Main Studio Area */}
         <div className="flex flex-1 overflow-hidden">
@@ -444,14 +760,47 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1">
                     {resumeData.revisions.map((rev, idx) => (
-                        <div key={rev.id} className={`p-3 rounded-lg cursor-pointer text-left transition-all border ${idx === resumeData.revisions.length - 1 ? 'bg-purple-50 border-purple-200 dark:bg-purple-900/20 dark:border-purple-900/50 shadow-sm' : 'bg-white dark:bg-gray-900 border-transparent hover:bg-slate-50 dark:hover:bg-gray-800'}`}>
-                            <div className="flex justify-between items-center mb-1">
-                                <span className={`text-sm font-medium ${idx === resumeData.revisions.length - 1 ? 'text-purple-700 dark:text-purple-400' : 'text-slate-700 dark:text-gray-300'}`}>{rev.name}</span>
-                                {rev.score && <span className="text-[10px] font-bold bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 px-1.5 rounded-md text-slate-600 dark:text-gray-400">{rev.score}</span>}
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-gray-500 line-clamp-1 mb-2">{rev.contentSummary}</p>
-                            <div className="flex gap-1 flex-wrap">
+                        <div key={rev.id} className={`p-3 rounded-lg text-left transition-all border ${previewRevision && previewRevision.id === rev.id ? 'ring-2 ring-purple-300 dark:ring-purple-700' : ''} ${idx === resumeData.revisions.length - 1 ? 'bg-purple-50 border-purple-200 dark:bg-purple-900/20 dark:border-purple-900/50 shadow-sm' : 'bg-white dark:bg-gray-900 border-transparent hover:bg-slate-50 dark:hover:bg-gray-800'}`}>
+                            <div onClick={() => { setPreviewRevision(rev); setShowOriginalPdf(false); }} className="cursor-pointer">
+                              <div className="flex justify-between items-start mb-2">
+                                <div className="min-w-0">
+                                  <span className={`text-sm font-medium ${idx === resumeData.revisions.length - 1 ? 'text-purple-700 dark:text-purple-400' : 'text-slate-700 dark:text-gray-300'}`}>{rev.name}</span>
+                                  <p className="text-xs text-slate-500 dark:text-gray-500 mt-1 line-clamp-2">{rev.contentSummary}</p>
+                                </div>
+                                <div className="flex flex-col items-end ml-3 gap-2">
+                                  {rev.score && <span className="text-[10px] font-bold bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 px-1.5 rounded-md text-slate-600 dark:text-gray-400">{rev.score}</span>}
+                                  <button
+                                    onClick={async (e) => {
+                                        e.stopPropagation();
+                                        try {
+                                            const ok = window.confirm('Delete this revision? This cannot be undone.');
+                                            if (!ok) return;
+                                            const newRevs = (resumeData.revisions || []).filter(r => r.id !== rev.id);
+                                            const newData = { ...resumeData, revisions: newRevs } as any;
+                                            await updateResume(resumeData.id, { data: newData, lastUpdated: new Date().toISOString() });
+                                            // create an audit revision entry for deletion
+                                            try {
+                                                const audit = { id: `rev_delete_${Date.now()}`, name: `Deleted: ${rev.id}`, createdAt: new Date().toISOString(), tags: ['delete'], contentSummary: `Deleted revision ${rev.id}` };
+                                                await createResumeRevision(resumeData.id, audit);
+                                            } catch (auditErr) {
+                                                console.warn('Failed to persist deletion audit revision', auditErr);
+                                            }
+                                            setResumeData(prev => ({ ...(prev as any), revisions: newRevs }));
+                                            if (previewRevision && previewRevision.id === rev.id) setPreviewRevision(null);
+                                        } catch (err) {
+                                            console.error('Failed to delete revision', err);
+                                            alert('Delete failed. See console for details.');
+                                        }
+                                    }}
+                                    className="text-xs inline-flex items-center gap-2 px-2 py-1 rounded bg-white border text-rose-600 hover:bg-rose-50"
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="flex gap-1 flex-wrap mt-2">
                                 {rev.tags.map(t => <span key={t} className="text-[10px] px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-slate-100 dark:border-gray-700 text-slate-500 dark:text-gray-400 rounded shadow-sm">{t}</span>)}
+                              </div>
                             </div>
                         </div>
                     ))}
@@ -460,43 +809,88 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
             {/* Center: PDF Canvas / Live Preview */}
             <div className="flex-1 overflow-y-auto bg-slate-100/50 dark:bg-gray-950 p-4 md:p-8 flex justify-center relative">
-                {/* A4 Paper Simulation - Renders from State */}
-                {/* ID 'printable-resume' targeted by @media print */}
-                <div id="printable-resume" className="w-full max-w-[210mm] min-h-[297mm] bg-white shadow-xl rounded-sm p-[10mm] md:p-[20mm] text-slate-900 relative transition-all ease-in-out duration-300 origin-top">
+                {/* If user requested the original PDF, show it in an iframe in the main area */}
+                {showOriginalPdf && (
+                    <div className="w-full max-w-5xl h-[90vh] bg-white shadow-xl rounded-sm overflow-hidden">
+                        {originalPdfUrl ? (
+                            <iframe src={originalPdfUrl} className="w-full h-full border-0" title="Original Resume PDF"></iframe>
+                        ) : (
+                            <div className="p-6 text-center text-slate-500">No public URL available for this file.</div>
+                        )}
+                    </div>
+                )}
+
+                {!showOriginalPdf && (
+                    <div id="printable-resume" className="w-full max-w-[210mm] min-h-[297mm] bg-white shadow-xl rounded-sm p-[10mm] md:p-[20mm] text-slate-900 relative transition-all ease-in-out duration-300 origin-top">
+                    {/* If previewRevision is set, show a banner and render the revision data instead of live data */}
+                    {previewRevision && (
+                        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-2 rounded-md shadow">
+                            <div className="flex items-center gap-3">
+                                <div className="text-sm font-medium">Viewing revision: <span className="font-bold">{previewRevision.name || previewRevision.id}</span></div>
+                                <div className="ml-4 flex items-center gap-2">
+                                    <div className="text-xs text-yellow-800 mr-3 hidden sm:block">This preview is read-only. Restoring will create a new "restore" revision and set this snapshot as current.</div>
+                                    <button onClick={async () => {
+                                        try {
+                                            if (isPreviewApplied) { alert('This revision is already applied.'); return; }
+                                            const ok = window.confirm('Restore this revision? This will create a new restore revision and set it as the current resume.');
+                                            if (!ok) return;
+                                            const rev = previewRevision;
+                                            let newData: any = { ...resumeData };
+                                            if (rev.data) newData = { ...newData, ...(rev.data || {}) };
+                                            else if (rev.parsed) {
+                                                newData.personalInfo = { ...newData.personalInfo, fullName: rev.parsed.name || newData.personalInfo.fullName, email: rev.parsed.email || newData.personalInfo.email, phone: rev.parsed.phone || newData.personalInfo.phone, summary: rev.parsed.summary || newData.personalInfo.summary };
+                                                if (rev.parsed.skills) newData.skills = Array.isArray(rev.parsed.skills) ? rev.parsed.skills : (String(rev.parsed.skills).split(',').map((s:string)=>({ name: s.trim(), level: 'Intermediate' })));
+                                            }
+                                            await updateResume(newData.id, { data: newData, lastUpdated: new Date().toISOString() });
+                                            const newRev = { id: `rev_restore_${Date.now()}`, name: `Restored: ${rev.name || rev.id}`, createdAt: new Date().toISOString(), tags: ['restore'], contentSummary: `Restored revision ${rev.id}` };
+                                            await createResumeRevision(newData.id, newRev);
+                                            setResumeData(newData);
+                                            setPreviewRevision(null);
+                                            alert('Revision restored');
+                                        } catch (err) {
+                                            console.error('Failed to restore revision', err);
+                                            alert('Failed to restore revision. See console.');
+                                        }
+                                    }} className={`px-2 py-1 rounded text-sm ${isPreviewApplied ? 'bg-slate-200 text-slate-600 cursor-not-allowed' : 'bg-emerald-600 text-white'}`} disabled={isPreviewApplied}>{isPreviewApplied ? 'Already Applied' : 'Restore Revision'}</button>
+                                    <button onClick={() => setPreviewRevision(null)} className="px-2 py-1 bg-white border rounded text-sm">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     {/* Header */}
                     <div className="border-b-2 border-slate-800 pb-4 mb-6">
-                        <h1 className="text-4xl font-bold uppercase tracking-tight mb-2">{resumeData.personalInfo.fullName}</h1>
+                        <h1 className="text-4xl font-bold uppercase tracking-tight mb-2">{displayData.personalInfo.fullName}</h1>
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
-                            <span>{resumeData.personalInfo.email}</span>
+                            <span>{displayData.personalInfo.email}</span>
                             <span className="text-slate-300">•</span>
-                            <span>{resumeData.personalInfo.phone}</span>
+                            <span>{displayData.personalInfo.phone}</span>
                             <span className="text-slate-300">•</span>
-                            <span>{resumeData.personalInfo.location}</span>
-                            {resumeData.personalInfo.website && (
+                            <span>{displayData.personalInfo.location}</span>
+                            {displayData.personalInfo.website && (
                                 <>
                                     <span className="text-slate-300">•</span>
-                                    <span className="text-purple-600">{resumeData.personalInfo.website}</span>
+                                    <span className="text-purple-600">{displayData.personalInfo.website}</span>
                                 </>
                             )}
                         </div>
                     </div>
 
                     {/* Summary */}
-                    {resumeData.personalInfo.summary && (
+                    {displayData.personalInfo.summary && (
                         <section className="mb-6">
                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Professional Summary</h2>
                             <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-line">
-                                {resumeData.personalInfo.summary}
+                                {displayData.personalInfo.summary}
                             </p>
                         </section>
                     )}
 
                     {/* Experience */}
-                    {resumeData.experience.length > 0 && (
+                    {displayData.experience.length > 0 && (
                         <section className="mb-6">
                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Experience</h2>
                             <div className="space-y-5">
-                                {resumeData.experience.map((exp) => (
+                                {displayData.experience.map((exp) => (
                                     <div key={exp.id} className="group relative rounded hover:bg-purple-50/30 transition-colors -mx-3 px-3 py-2">
                                         <div className="flex justify-between items-baseline mb-1">
                                             <h3 className="font-bold text-slate-800 text-base">{exp.role}</h3>
@@ -525,11 +919,11 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     )}
                     
                     {/* Education */}
-                    {resumeData.education.length > 0 && (
+                    {displayData.education.length > 0 && (
                          <section className="mb-6">
                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Education</h2>
                             <div className="space-y-3">
-                                {resumeData.education.map((edu) => (
+                                {displayData.education.map((edu) => (
                                     <div key={edu.id} className="flex justify-between items-baseline">
                                         <div>
                                             <h3 className="font-bold text-slate-800 text-base">{edu.school}</h3>
@@ -543,11 +937,11 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     )}
 
                     {/* Skills */}
-                    {resumeData.skills.length > 0 && (
+                    {displayData.skills.length > 0 && (
                         <section>
                              <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
                              <div className="flex flex-wrap gap-2 text-sm">
-                                {resumeData.skills.map(skill => (
+                                {displayData.skills.map(skill => (
                                     <span key={skill.name} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium">
                                         {skill.name}
                                     </span>
@@ -556,11 +950,37 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                         </section>
                     )}
                 </div>
+                )}
             </div>
 
-            {/* Right: AI Assistant & Editor */}
-            {isRightPanelOpen && (
-                <div className="w-96 bg-white dark:bg-gray-900 border-l border-slate-200 dark:border-gray-800 flex flex-col shrink-0 animate-in slide-in-from-right duration-300 shadow-xl z-10 backdrop-blur-xl">
+                        {/* Divider + Right: AI Assistant & Editor (resizable) */}
+                        {isRightPanelOpen && (
+                            <>
+                                <div
+                                    onMouseDown={(e) => {
+                                        // start resizing
+                                        resizingRef.current.active = true;
+                                        resizingRef.current.startX = e.clientX;
+                                        resizingRef.current.startWidth = rightPanelWidth;
+                                        // attach move/up to window to capture global
+                                        const onMove = (ev: MouseEvent) => {
+                                            if (!resizingRef.current.active) return;
+                                            const dx = resizingRef.current.startX - ev.clientX;
+                                            const newWidth = Math.min(720, Math.max(280, resizingRef.current.startWidth + dx));
+                                            setRightPanelWidth(newWidth);
+                                        };
+                                        const onUp = () => {
+                                            resizingRef.current.active = false;
+                                            window.removeEventListener('mousemove', onMove);
+                                            window.removeEventListener('mouseup', onUp);
+                                        };
+                                        window.addEventListener('mousemove', onMove);
+                                        window.addEventListener('mouseup', onUp);
+                                    }}
+                                    className="w-2 cursor-col-resize hover:bg-slate-200 dark:hover:bg-gray-700 transition-colors"
+                                />
+
+                                <div style={{ width: rightPanelWidth }} className="bg-white dark:bg-gray-900 border-l border-slate-200 dark:border-gray-800 flex flex-col shrink-0 animate-in slide-in-from-right duration-300 shadow-xl z-10 backdrop-blur-xl">
                     {/* Tabs */}
                     <div className="flex border-b border-slate-200 dark:border-gray-800">
                         <button 
@@ -581,6 +1001,9 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     <div className="flex-1 overflow-y-auto p-6 scroll-smooth bg-slate-50/30 dark:bg-black/20">
                         {assistantTab === 'analysis' ? (
                             <div className="space-y-8">
+                                <div className="flex justify-end">
+                                    <button onClick={handleAnalyze} className="text-sm px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md">Run Analysis</button>
+                                </div>
                                 {/* Score Card (Fixed SVG) */}
                                 <div className="text-center relative py-4">
                                     <div className="inline-flex items-center justify-center w-32 h-32 relative">
@@ -667,6 +1090,18 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                                                     <Wand2 size={10} /> Suggestion:
                                                                 </span>
                                                                 {issue.suggestion}
+                                                                <div className="mt-2 flex gap-2">
+                                                                    <button onClick={() => handleSuggestRewrite(issue)} className="text-xs px-2 py-1 bg-white border rounded">Suggest Rewrite</button>
+                                                                    {issue.suggestionCandidates && issue.suggestionCandidates.length > 0 && (
+                                                                        <button onClick={() => {
+                                                                            // apply the first candidate immediately for convenience
+                                                                            const cand = issue.suggestionCandidates[0];
+                                                                            if (issue.fixAction && issue.fixAction.targetSection === 'summary') {
+                                                                                handleInputChange('personalInfo', 'summary', cand);
+                                                                            }
+                                                                        }} className="text-xs px-2 py-1 bg-emerald-600 text-white rounded">Apply Suggestion</button>
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                         )}
 
@@ -702,7 +1137,15 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                 </div>
 
                                 <div className="space-y-4">
-                                    <h3 className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase tracking-wider border-b border-slate-200 dark:border-gray-700 pb-2">Personal Info</h3>
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase tracking-wider border-b border-slate-200 dark:border-gray-700 pb-2">Personal Info</h3>
+                                        {parsedPreview && (
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={() => applyParsedData()} className="text-xs px-2 py-1 bg-white border rounded text-slate-700 hover:bg-slate-50">Apply Parsed Data</button>
+                                                <button onClick={() => setParsedPreview(null)} className="text-xs px-2 py-1 bg-white border rounded text-slate-500 hover:bg-slate-50">Dismiss</button>
+                                            </div>
+                                        )}
+                                    </div>
                                     <div className="space-y-3">
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 dark:text-gray-400 mb-1">Full Name</label>
@@ -883,6 +1326,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                         )}
                     </div>
                 </div>
+                </>
             )}
         </div>
 
@@ -1004,50 +1448,9 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 </div>
             </div>
         )}
-        {/* Original PDF Modal */}
-        {showOriginalPdf && (
-            <div className="fixed inset-0 z-60 p-6 flex items-stretch justify-center bg-black/60">
-                <div className="bg-white dark:bg-gray-900 rounded-lg w-full max-w-5xl h-[80vh] overflow-hidden flex flex-col">
-                    <div className="p-3 border-b border-slate-100 dark:border-gray-800 flex justify-between items-center">
-                        <div className="text-sm font-bold">Original PDF</div>
-                        <div className="flex items-center gap-2">
-                            <button onClick={() => setShowOriginalPdf(false)} className="px-3 py-1 rounded bg-slate-100 dark:bg-gray-800">Close</button>
-                        </div>
-                    </div>
-                    <div className="flex-1 bg-gray-100">
-                        {originalPdfUrl ? (
-                            <iframe src={originalPdfUrl} className="w-full h-full border-0" title="Original Resume PDF"></iframe>
-                        ) : (
-                            <div className="p-6 text-center text-slate-500">No public URL available for this file.</div>
-                        )}
-                    </div>
-                </div>
-            </div>
-        )}
+        
 
-        {/* Parsed Preview Floating Panel */}
-        {parsedPreview && (
-            <div className="fixed right-6 bottom-6 z-50 w-96 bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800 rounded-xl shadow-xl p-4">
-                <div className="flex justify-between items-start mb-2">
-                    <div>
-                        <div className="text-sm font-bold">Parsed Preview</div>
-                        <div className="text-xs text-slate-500">Preview of fields extracted from PDF</div>
-                    </div>
-                    <button onClick={() => setParsedPreview(null)} className="text-sm text-slate-400">✕</button>
-                </div>
-                <div className="text-sm text-slate-700 dark:text-gray-300 space-y-2 mb-3 max-h-44 overflow-y-auto">
-                    <div><strong>Name:</strong> {parsedPreview.name}</div>
-                    <div><strong>Email:</strong> {parsedPreview.email}</div>
-                    <div><strong>Phone:</strong> {parsedPreview.phone}</div>
-                    <div><strong>Skills:</strong> {parsedPreview.skillsText}</div>
-                    <div className="mt-2"><strong>Summary (excerpt):</strong><div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">{parsedPreview.summary?.slice(0,500)}</div></div>
-                </div>
-                <div className="flex gap-2 justify-end">
-                    <button onClick={() => setParsedPreview(null)} className="px-3 py-2 rounded bg-slate-100 dark:bg-gray-800">Close</button>
-                    <button onClick={applyParsedData} className="px-3 py-2 rounded bg-emerald-600 text-white">Apply Parsed Data</button>
-                </div>
-            </div>
-        )}
+        {/* Parsed preview is applied automatically on load; no manual preview panel shown. */}
         {/* Parsing notification */}
         {isParsing && (
             <div className="fixed left-6 bottom-6 z-60 w-80 bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800 rounded-xl shadow-lg p-3 flex items-center gap-3">

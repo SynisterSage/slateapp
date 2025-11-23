@@ -25,6 +25,7 @@ export default async function handler(req, res) {
 
     const resumeId = query && query.resumeId;
     const fileName = query && query.fileName;
+    const owner = query && query.owner;
     if (!resumeId || !fileName) return res.status(400).json({ error: 'Missing resumeId or fileName' });
 
     const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || process.env.SUPABASE_URL_FALLBACK;
@@ -50,12 +51,13 @@ export default async function handler(req, res) {
 
     const safeName = String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
     const path = `${resumeId}/${safeName}`;
-    console.log('Uploading file', { path, size: buffer ? buffer.length : 0 });
+    const bucketName = 'resumes';
+    console.log('Uploading file', { bucket: bucketName, path, size: buffer ? buffer.length : 0 });
 
     // Upload to storage (server-side, uses service role)
     let uploadData, uploadErr;
     try {
-      const resp = await serverClient.storage.from('resumes').upload(path, buffer, { contentType: 'application/pdf', upsert: true });
+      const resp = await serverClient.storage.from(bucketName).upload(path, buffer, { contentType: 'application/pdf', upsert: true });
       uploadData = resp.data;
       uploadErr = resp.error;
     } catch (ue) {
@@ -73,11 +75,13 @@ export default async function handler(req, res) {
       const { data: existing, error: getErr } = await serverClient.from('resumes').select('*').eq('id', resumeId).single();
       let rowObj = null;
       if (getErr || !existing) {
-        rowObj = { id: resumeId, data: { id: resumeId, fileName, storage_path: path, title: fileName.replace('.pdf',''), lastUpdated: new Date().toISOString() } };
+        rowObj = { id: resumeId, data: { id: resumeId, fileName, storage_path: `${bucketName}/${path}`, title: fileName.replace('.pdf',''), lastUpdated: new Date().toISOString() } };
+        if (owner) rowObj.owner = owner;
       } else {
         const payload = existing.data ? existing.data : existing;
-        const merged = { ...payload, storage_path: path, fileName, lastUpdated: new Date().toISOString() };
+        const merged = { ...payload, storage_path: `${bucketName}/${path}`, fileName, lastUpdated: new Date().toISOString() };
         rowObj = { id: resumeId, data: merged };
+        if (owner) rowObj.owner = owner;
       }
       const { data: upserted, error: upsertErr } = await serverClient.from('resumes').upsert(rowObj).select().single();
       if (upsertErr) {
@@ -119,7 +123,9 @@ export default async function handler(req, res) {
                 const existingRow = (upserted && upserted.data) ? upserted.data : upserted;
                 const existingRevs = Array.isArray(existingRow.revisions) ? existingRow.revisions : (existingRow.revisions ? [existingRow.revisions] : []);
                 const newData = { ...existingRow, revisions: [...existingRevs, parsedRevision], lastUpdated: new Date().toISOString() };
-                const { data: finalUpsert, error: finalUpsertErr } = await serverClient.from('resumes').upsert({ id: resumeId, data: newData }).select().single();
+                const upsertPayload = { id: resumeId, data: newData };
+                if (owner) upsertPayload.owner = owner;
+                const { data: finalUpsert, error: finalUpsertErr } = await serverClient.from('resumes').upsert(upsertPayload).select().single();
                 if (finalUpsertErr) {
                   console.warn('Failed to persist parsed revision', finalUpsertErr);
                   // return parsed result even if we couldn't persist the revision
