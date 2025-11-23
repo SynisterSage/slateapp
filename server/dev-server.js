@@ -1,6 +1,21 @@
 import http from 'http';
 import url from 'url';
+import path from 'path';
+import dotenv from 'dotenv';
 import jobsHandler from '../api/jobs.js';
+
+// Load environment variables from .env.local (preferred) or .env so handlers see keys
+const envPathLocal = path.resolve(process.cwd(), '.env.local');
+const envPath = path.resolve(process.cwd(), '.env');
+try {
+  const result = dotenv.config({ path: envPathLocal });
+  if (result.error) {
+    // fallback to .env
+    dotenv.config({ path: envPath });
+  }
+} catch (e) {
+  // ignore dotenv errors; process.env may already be set by the caller
+}
 
 const PORT = process.env.DEV_SERVER_PORT ? parseInt(process.env.DEV_SERVER_PORT) : 3001;
 
@@ -53,9 +68,11 @@ const server = http.createServer(async (req, res) => {
         const parseHandler = (await import('../api/parseResume.js')).default;
         await parseHandler(fakeReq, fakeRes);
       } else if (parsed.pathname === '/api/analyze') {
+        // Use canonical analyze handler (do not prefer _fixed versions)
         const analyzeHandler = (await import('../api/analyze.js')).default;
         await analyzeHandler(fakeReq, fakeRes);
       } else if (parsed.pathname === '/api/suggest') {
+        // Use canonical suggest handler (do not prefer _fixed versions)
         const suggestHandler = (await import('../api/suggest.js')).default;
         await suggestHandler(fakeReq, fakeRes);
       } else if (parsed.pathname === '/api/update-resume') {

@@ -44,6 +44,73 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         return () => { mounted = false; };
     }, [resumeId]);
 
+        // Hiration-like heuristics: lightweight client-side checks to augment AI analysis
+        const computeHirationHeuristics = (data: Resume) => {
+            const categories: Record<string, number> = {};
+            const issues: any[] = [];
+
+            try {
+                const summary = String(data.personalInfo?.summary || '').trim();
+                const summaryLen = summary.length;
+                // Clarity / Summary score (0-100)
+                categories.clarity = Math.min(100, Math.round((Math.min(800, summaryLen) / 800) * 100));
+                if (summaryLen < 100) {
+                    issues.push({ id: `hir_summary_short_${Date.now()}`, severity: 'major', title: 'Short or Missing Summary', description: 'Summary is short or missing — add 2–4 achievement-oriented sentences with metrics.', suggestion: 'Expand the summary to include achievements and quantifiable outcomes.', fixAction: { targetSection: 'summary', newContent: summary } });
+                } else if (summaryLen < 220) {
+                    issues.push({ id: `hir_summary_expand_${Date.now()}`, severity: 'minor', title: 'Consider Expanding Summary', description: 'Summary is brief; expanding with impact statements improves clarity.', suggestion: 'Add 1–2 short achievements with numbers (e.g., increased X by Y%).', fixAction: { targetSection: 'summary', newContent: summary } });
+                }
+
+                // Contact info
+                const email = String(data.personalInfo?.email || '').trim();
+                const phone = String(data.personalInfo?.phone || '').trim();
+                if (!email || !/@/.test(email)) {
+                    issues.push({ id: `hir_contact_email_${Date.now()}`, category: 'contact', source: 'heuristic', severity: 'major', title: 'Missing or Invalid Email', description: 'No valid email detected in contact info.', suggestion: 'Add a professional email address at top of resume.', fixAction: null });
+                }
+                if (!phone || phone.length < 7) {
+                    issues.push({ id: `hir_contact_phone_${Date.now()}`, category: 'contact', source: 'heuristic', severity: 'minor', title: 'Missing Phone Number', description: 'Phone number not found or looks short.', suggestion: 'Add a phone number for recruiters to contact you.', fixAction: null });
+
+                }
+
+                // Experience & Reverse chronology
+                const exp = Array.isArray(data.experience) ? data.experience : [];
+                if (exp.length === 0) {
+                    issues.push({ id: `hir_no_experience_${Date.now()}`, category: 'reverseChron', source: 'heuristic', severity: 'critical', title: 'No Experience Entries', description: 'No work experience found — add at least one role with 3–5 bullets showing results.', suggestion: 'Add roles with measurable outcomes and 3–5 bullets each.', fixAction: null });
+                } else {
+                    // Check ordering (most recent first heuristic: look at date strings)
+                    try {
+                        const parsedDates = exp.map((e:any, i:number) => ({ idx: i, raw: e.date || '', parsed: Date.parse((e.date || '').split('–')[0].trim() || '') || 0 }));
+                        const isReverseChron = parsedDates.every((d:any, i:number, arr:any[]) => i === 0 || d.parsed <= arr[i-1].parsed);
+                        if (!isReverseChron) {
+                            issues.push({ id: `hir_reverse_chron_${Date.now()}`, category: 'reverseChron', source: 'heuristic', severity: 'minor', title: 'Non-reverse chronological order', description: 'Experience entries may not be ordered newest-to-oldest.', suggestion: 'Sort your roles with most recent first for clarity.', fixAction: null });
+                        }
+                    } catch (e) { /* ignore parse errors */ }
+                    // Bullet analysis: require numbers/metrics in at least one bullet per role
+                    for (const e of exp) {
+                        const bullets = Array.isArray(e.bullets) ? e.bullets : [];
+                        const hasMetric = bullets.some((b:string) => /\d+[%+]?|\b\d{4}\b|\b\d+\b/.test(b));
+                        if (!hasMetric) {
+                            const roleLabel = (e as any).title || (e as any).position || (e as any).company || 'Untitled';
+                            issues.push({ id: `hir_bullets_metrics_${e.id || Math.random()}`, category: 'bullets', source: 'heuristic', severity: 'minor', title: 'Bullets Lack Metrics', description: `Role "${roleLabel}" has bullets without measurable impact. Add metrics where possible.`, suggestion: 'Convert one or more bullets to include numbers, percentages, or timeframes.', fixAction: null });
+                        }
+                    }
+                }
+
+                // Skills coverage
+                const skills = Array.isArray(data.skills) ? data.skills.map((s:any) => String(s.name || '').toLowerCase()) : [];
+                categories.skills = Math.min(100, Math.round((Math.min(20, skills.length) / 20) * 100));
+                if (skills.length < 5) {
+                    issues.push({ id: `hir_skills_few_${Date.now()}`, category: 'skills', source: 'heuristic', severity: 'minor', title: 'Few Skills Detected', description: 'Fewer than 5 skills found — add relevant technical and role-specific keywords.', suggestion: 'Add 5–12 core skills relevant to the target role.', fixAction: null });
+                }
+
+                // Formatting baseline
+                categories.formatting = 75; // neutral baseline — server AI may override
+
+            } catch (err) {
+                console.warn('Heuristics failed', err);
+            }
+
+            return { categories, issues };
+        };
       // If the server persisted an auto-parsed revision but top-level personalInfo is empty,
       // merge the parsed revision into local state for immediate display (do not persist automatically).
       useEffect(() => {
@@ -98,6 +165,56 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
   const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor'>('analysis');
   const [showTuneModal, setShowTuneModal] = useState(false);
   const [fixingIssueId, setFixingIssueId] = useState<string | null>(null);
+    // Suggestion modal state
+    const [suggestionModalOpen, setSuggestionModalOpen] = useState(false);
+    const [suggestionModalIssue, setSuggestionModalIssue] = useState<any | null>(null);
+    const [suggestionModalCandidates, setSuggestionModalCandidates] = useState<string[]>([]);
+    // Editable content for suggestion modal
+    const [suggestionModalEditValue, setSuggestionModalEditValue] = useState<string>('');
+    // Track last applied suggestion to show success / diff info
+    const [suggestionApplySuccess, setSuggestionApplySuccess] = useState<{ issueId: string; title: string; targetSection?: string | null; oldValue: string; newValue: string } | null>(null);
+    // Inline editing state for direct page edits
+    const [inlineEdit, setInlineEdit] = useState<{ section: string; field: string; id?: string | null; index?: number | null; value: string } | null>(null);
+
+    const cancelInlineEdit = () => setInlineEdit(null);
+
+    const saveInlineEdit = async () => {
+        if (!inlineEdit) return;
+        const { section, field, id, index, value } = inlineEdit;
+        try {
+            // Build newData deterministically so we can persist the exact state
+            let newData: any = { ...(resumeData as any) };
+            if (section === 'personalInfo') {
+                newData.personalInfo = { ...newData.personalInfo, [field]: value };
+                setResumeData(newData);
+            } else if (section === 'experience' && id) {
+                newData.experience = (newData.experience || []).map((exp:any) => {
+                    if (exp.id !== id) return exp;
+                    if (field === 'bullet' && typeof index === 'number') {
+                        const bullets = Array.isArray(exp.bullets) ? exp.bullets.slice() : [];
+                        bullets[index] = value;
+                        return { ...exp, bullets };
+                    }
+                    return { ...exp, [field]: value };
+                });
+                setResumeData(newData);
+            }
+
+            // Persist to server (no revision created)
+            try {
+                await updateResume(newData.id, { data: newData, lastUpdated: new Date().toISOString() });
+            } catch (err) {
+                console.warn('Failed to persist inline edit', err);
+            }
+        } catch (e) {
+            console.error('saveInlineEdit error', e);
+        } finally {
+            setInlineEdit(null);
+        }
+    };
+    // Cooldowns to avoid rapid repeated API calls / token spikes
+    const [analyzeCooldown, setAnalyzeCooldown] = useState(false);
+    const [suggestCooldowns, setSuggestCooldowns] = useState<Record<string, boolean>>({});
   
   // Tuning State
   const [tuneJobRole, setTuneJobRole] = useState('');
@@ -130,35 +247,24 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         setFixingIssueId(issue.id);
 
         try {
-            // Apply locally for immediate feedback
-            setResumeData(prev => {
-                const newData = { ...prev };
-                if (issue.fixAction?.targetSection === 'experience' && issue.fixAction.targetId) {
-                    newData.experience = newData.experience.map(exp => exp.id === issue.fixAction?.targetId ? { ...exp, bullets: issue.fixAction.newContent as string[] } : exp);
-                } else if (issue.fixAction?.targetSection === 'summary') {
-                    newData.personalInfo = { ...newData.personalInfo, summary: issue.fixAction.newContent as string };
-                }
-                if (newData.analysis) {
-                    newData.analysis = {
-                        ...newData.analysis,
-                        overallScore: Math.min(100, (newData.analysis.overallScore || 0) + 5),
-                        issues: (newData.analysis.issues || []).filter(i => i.id !== issue.id)
-                    };
-                }
-                return newData;
-            });
+            // Build deterministic newData and apply changes so we can persist the exact object
+            const newData: any = { ...(resumeData as any) };
+            if (issue.fixAction?.targetSection === 'experience' && issue.fixAction.targetId) {
+                newData.experience = newData.experience.map((exp:any) => exp.id === issue.fixAction?.targetId ? { ...exp, bullets: issue.fixAction.newContent as string[] } : exp);
+            } else if (issue.fixAction?.targetSection === 'summary') {
+                newData.personalInfo = { ...newData.personalInfo, summary: issue.fixAction.newContent as string };
+            }
+            if (newData.analysis) {
+                newData.analysis = {
+                    ...newData.analysis,
+                    overallScore: Math.min(100, (newData.analysis.overallScore || 0) + 5),
+                    issues: (newData.analysis.issues || []).filter((i:any) => i.id !== issue.id)
+                };
+            }
 
-            // Persist change and create a revision record
-            const rev = {
-                id: `rev_fix_${Date.now()}`,
-                name: `Fix: ${issue.id}`,
-                createdAt: new Date().toISOString(),
-                tags: ['AI Fix'],
-                contentSummary: issue.suggestion || issue.title,
-            };
-
-            await updateResume(resumeData.id, { data: { ...resumeData, lastUpdated: new Date().toISOString() } });
-            await createResumeRevision(resumeData.id, rev);
+            // Update local state and persist (no revision created)
+            setResumeData(newData);
+            await updateResume(newData.id, { data: newData, lastUpdated: new Date().toISOString() });
         } catch (err) {
             console.error('Failed to apply fix', err);
         } finally {
@@ -208,7 +314,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     const handleGeneratePdf = async () => {
         try {
             setIsGeneratingPdf(true);
-            const json = await generatePdf(resumeData.id);
+            let json: any = await generatePdf(resumeData.id);
             const url = json && json.url ? json.url : (json && json.row && json.row.data && json.row.data.generated_pdf_path ? json.row.data.generated_pdf_path : null);
             if (url && typeof url === 'string') {
                 // If the server returned a signed URL, open it; otherwise try to resolve via storage helper
@@ -224,29 +330,58 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     setResumeData(rowData);
                 }
             } else {
-                alert('PDF generation succeeded but no URL returned');
+            // Normalize returned json and capture raw text if the model returned unstructured output
+            let rawText: string | null = null;
+            try {
+                if (json && typeof json.raw === 'string') rawText = json.raw;
+                else if (json && typeof json === 'string') rawText = json;
+                else if (json && typeof json === 'object' && json.rawText) rawText = json.rawText;
+                // Attempt JSON.parse on raw if it looks like JSON
+                if (rawText) {
+                    try { const p = JSON.parse(rawText); if (p) json = p; } catch (e) { /* rawText remains */ }
+                }
+            } catch (e) { /* noop */ }
+                }
+            } catch (err) {
+                console.error('Generate PDF failed', err);
+            } finally {
+                setIsGeneratingPdf(false);
             }
-        } catch (err) {
-            console.error('Generate PDF failed', err);
-            alert('Generate PDF failed. See console for details.');
-        } finally {
-            setIsGeneratingPdf(false);
-        }
     };
 
     // --- New: Analysis / Suggestion / Revision helpers ---
     const handleAnalyze = async () => {
         try {
+            if (analyzeCooldown) {
+                alert('Analysis is cooling down — please wait a few seconds before re-running.');
+                return;
+            }
+            // set a short cooldown to limit token usage from repeated clicks
+            setAnalyzeCooldown(true);
+            setTimeout(() => setAnalyzeCooldown(false), 8000);
             // Try server-side analyze endpoint first
             const payload = { id: resumeData.id, data: resumeData };
             let json: any = null;
+            let rawText: string | null = null;
             try {
                 const resp = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                if (resp.ok) json = await resp.json();
+                if (resp.ok) {
+                    json = await resp.json();
+                    if (json && typeof json.raw === 'string') rawText = json.raw;
+                    else if (json && typeof json === 'string') rawText = json;
+                    else if (json && typeof json === 'object' && json.rawText) rawText = json.rawText;
+                }
             } catch (e) {
                 // ignore - we'll fall back to client-side heuristics
             }
-
+            // If backend returned raw text, attempt to parse it into JSON
+            try {
+                if (rawText) {
+                    try { const p = JSON.parse(rawText); if (p) json = p; } catch (e) { /* leave as-is */ }
+                } else if (json && typeof json === 'string') {
+                    try { const p = JSON.parse(json); if (p) json = p; } catch (e) { /* leave as-is */ }
+                }
+            } catch (e) { /* noop */ }
             if (!json) {
                 // Fallback heuristic analysis (mock) so UI works without backend AI
                 const summaryLen = String(resumeData.personalInfo.summary || '').trim().length;
@@ -261,8 +396,73 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 json = { overallScore: overall, categories, issues };
             }
 
+            // Build an analysis object for the UI
+            const analysisObj: any = { overallScore: 0, categories: {}, issues: [] };
+            if (json && typeof json === 'object') {
+                analysisObj.overallScore = json.overallScore || json.overall || 0;
+                analysisObj.categories = json.categories || json.cat || json.scores || {};
+                analysisObj.issues = json.issues || json.issues || json.problems || [];
+            }
+            // If we have rawText (unstructured model output), attempt to extract common category scores and include rawText for inspection
+            if (!analysisObj.overallScore && rawText) {
+                const parsed = (function parseRaw(text: string) {
+                    const out: any = { categories: {}, issues: [] };
+                    // Try find lines like "Structure 25/25" or "Structure: 25/25" or "Structure — 25/25" or "Structure: 80"
+                    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+                    for (const l of lines) {
+                        const m = l.match(/(Structure|Skill Level|Skills|Contact Info|Contact|Reverse Chronology|Reverse Chron|Bullet Analysis|Bullets|Overall)[:\-–\s]*([0-9]{1,3})(?:\/?([0-9]{1,3}))?/i);
+                        if (m) {
+                            const key = m[1].toLowerCase();
+                            const a = Number(m[2]);
+                            const b = m[3] ? Number(m[3]) : null;
+                            const pct = b ? Math.round((a / b) * 100) : (a <= 100 ? a : Math.min(100, a));
+                            if (/structure/i.test(key)) out.categories.structure = pct;
+                            else if (/skill/i.test(key) || /skills/i.test(key)) out.categories.skills = pct;
+                            else if (/contact/i.test(key)) out.categories.contact = pct;
+                            else if (/reverse/i.test(key)) out.categories.reverseChron = pct;
+                            else if (/bullet/i.test(key) || /bullets/i.test(key)) out.categories.bullets = pct;
+                            else if (/overall/i.test(key)) out.overall = pct;
+                        }
+                        // capture simple issue lines
+                        const issueMatch = l.match(/^-\s*(CRITICAL|MAJOR|MINOR)?[:\s]*(.+)/i);
+                        if (issueMatch) out.issues.push({ title: issueMatch[2].trim(), severity: (issueMatch[1] || 'minor').toLowerCase() });
+                    }
+                    return out;
+                })(rawText);
+                if (parsed && parsed.categories) {
+                    analysisObj.categories = { ...analysisObj.categories, ...parsed.categories };
+                }
+                if (!analysisObj.overallScore && parsed && parsed.overall) analysisObj.overallScore = parsed.overall;
+                if (parsed && parsed.issues && parsed.issues.length) analysisObj.issues = [...(analysisObj.issues || []), ...parsed.issues];
+                analysisObj.rawOutput = rawText;
+            } else if (json && typeof json === 'string') {
+                analysisObj.rawOutput = json;
+            }
+
+            // Run client-side heuristics and merge with AI analysis (AI values take precedence)
+            try {
+                const heur = computeHirationHeuristics(resumeData as Resume);
+                analysisObj.categories = { ...(heur.categories || {}), ...(analysisObj.categories || {}) };
+                const existingIds = new Set((analysisObj.issues || []).map((i:any) => i.id));
+                for (const hi of (heur.issues || [])) {
+                    if (!existingIds.has(hi.id)) analysisObj.issues.push(hi);
+                }
+                analysisObj.source = 'ai+heuristics';
+            } catch (e) { /* noop */ }
+
+            // If AI didn't provide an overall score, attempt to compute one from categories
+            try {
+                if (!analysisObj.overallScore) {
+                    const vals = Object.values(analysisObj.categories || {}).filter(v => typeof v === 'number');
+                    if (vals.length) {
+                        const avg = Math.round(vals.reduce((a:any,b:any)=>a+b,0) / vals.length);
+                        analysisObj.overallScore = Math.min(100, Math.max(0, avg));
+                    }
+                }
+            } catch (e) { /* noop */ }
+
             // Merge into resumeData.analysis
-            setResumeData(prev => ({ ...(prev as any), analysis: { overallScore: json.overallScore || json.overall || 0, categories: json.categories || json.cat || {}, issues: json.issues || json.issues || [] } } as Resume));
+            setResumeData(prev => ({ ...(prev as any), analysis: { overallScore: analysisObj.overallScore || 0, categories: analysisObj.categories || {}, issues: analysisObj.issues || [], rawOutput: analysisObj.rawOutput || null } } as Resume));
             setAssistantTab('analysis');
         } catch (err) {
             console.error('Analysis failed', err);
@@ -271,6 +471,10 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     };
 
     const handleSuggestRewrite = async (issue: any) => {
+        if (suggestCooldowns[issue.id]) {
+            alert('Please wait a few seconds before requesting another suggestion for this issue.');
+            return;
+        }
         // Try server-side suggest endpoint, else local mock
         try {
             let json: any = null;
@@ -290,15 +494,82 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 }
             }
 
-            // Attach suggestion into issue for quick apply/preview
+            // Attach suggestion candidates into issue for quick apply/preview and open modal
+            const candidates: string[] = json.candidates || (Array.isArray(json.suggestion) ? json.suggestion : (json.suggestion ? [json.suggestion] : []));
             setResumeData(prev => {
                 const newData: any = { ...(prev as any) };
-                newData.analysis = { ...(newData.analysis || {}), issues: (newData.analysis?.issues || []).map((i:any) => i.id === issue.id ? { ...i, suggestionCandidates: json.candidates || [json.suggestion || json] } : i) };
+                newData.analysis = { ...(newData.analysis || {}), issues: (newData.analysis?.issues || []).map((i:any) => i.id === issue.id ? { ...i, suggestionCandidates: candidates } : i) };
                 return newData;
             });
+
+            // Open modal showing candidates
+            setSuggestionModalIssue(issue);
+            // only keep a single candidate to save tokens and UI complexity
+            const first = candidates && candidates.length ? String(candidates[0]) : '';
+            setSuggestionModalCandidates(first ? [first] : []);
+            setSuggestionModalEditValue(first);
+            setSuggestionModalOpen(true);
+            // set a short cooldown for this issue to avoid repeated calls
+            try {
+                setSuggestCooldowns(prev => ({ ...prev, [issue.id]: true }));
+                setTimeout(() => setSuggestCooldowns(prev => ({ ...prev, [issue.id]: false })), 6000);
+            } catch (e) {}
         } catch (err) {
             console.error('Suggest failed', err);
             alert('Suggest failed. See console.');
+        }
+    };
+
+    // Field-level suggest helper (for inline "Improve with Gemini" on summary, bullets, skills)
+    const handleFieldSuggest = async (targetSection: string, targetId: string | null, currentText: string) => {
+        const issue = {
+            id: `issue_field_${Date.now()}`,
+            severity: 'minor',
+            title: `Improve ${targetSection}`,
+            description: `Improve the content for ${targetSection}`,
+            fixAction: { targetSection, targetId, newContent: currentText }
+        };
+        await handleSuggestRewrite(issue);
+    };
+
+    const applySuggestionCandidate = async (issue: any, candidate: string) => {
+        try {
+            // Close modal immediately for snappy UX
+            setSuggestionModalOpen(false);
+            // Apply locally and capture old value for feedback
+            let oldValue = '';
+            try {
+                if (issue.fixAction && issue.fixAction.targetSection === 'summary') {
+                    oldValue = String(resumeData.personalInfo.summary || '');
+                    handleInputChange('personalInfo', 'summary', candidate);
+                } else if (issue.fixAction && issue.fixAction.targetSection === 'experience' && issue.fixAction.targetId) {
+                    const bullets = candidate.split('\n').map((l:string) => l.trim()).filter(Boolean);
+                    const expBefore = (resumeData.experience || []).find((ex:any) => ex.id === issue.fixAction.targetId);
+                    oldValue = expBefore ? (Array.isArray(expBefore.bullets) ? expBefore.bullets.join('\n') : String(expBefore.bullets || '')) : '';
+                    setResumeData(prev => ({ ...prev, experience: prev.experience.map((exp:any) => exp.id === issue.fixAction.targetId ? { ...exp, bullets } : exp) } as Resume));
+                } else if (issue.fixAction && issue.fixAction.targetSection === 'skills') {
+                    const skills = candidate.split(/[,\n]/).map((s:string) => s.trim()).filter(Boolean);
+                    oldValue = (resumeData.skills || []).map((s:any) => s.name).join(', ');
+                    setResumeData(prev => ({ ...prev, skills: skills.map((s:string)=>({ name: s, level: 'Intermediate' })) } as Resume));
+                }
+
+                // Persist updated resume (overwrite parsed data per spec)
+                try {
+                    const newData = { ...resumeData } as any;
+                    await updateResume(resumeData.id, { data: newData, lastUpdated: new Date().toISOString() });
+                    // show success banner and what changed
+                    setSuggestionApplySuccess({ issueId: issue.id, title: issue.title || 'Suggestion', targetSection: issue.fixAction?.targetSection || null, oldValue, newValue: candidate });
+                    setTimeout(() => setSuggestionApplySuccess(null), 4500);
+                } catch (err) {
+                    console.warn('Failed to persist applied suggestion', err);
+                }
+                // Do NOT create a revision here; revisions are only created when the user explicitly saves a revision.
+            } catch (err) {
+                console.error('applySuggestionCandidate inner error', err);
+            }
+        } catch (err) {
+            console.error('applySuggestionCandidate error', err);
+            alert('Failed to apply suggestion. See console.');
         }
     };
 
@@ -344,8 +615,8 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     }, 2000);
   };
 
-  // --- PDF Helpers ---
-  const getStoragePublicUrl = async (path: string) => {
+    // --- PDF Helpers ---
+    async function getStoragePublicUrl(path: string) {
       // If the path looks like 'bucket/obj/path', prefer that bucket first
       try {
           if (!path) return null;
@@ -401,7 +672,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
       console.warn(msg);
       setParseError(msg);
       return null;
-  };
+  }
 
   const loadOriginalPdfUrl = async (): Promise<string | null> => {
       // Resume rows may store a `storage_path` or we can construct one from `fileName`
@@ -448,6 +719,15 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               } else {
                   setParsedPreview(null);
               }
+
+              // If there's no AI analysis present, run heuristics so the sidebar isn't empty
+              try {
+                  const hasAnalysis = resumeData.analysis && ((resumeData.analysis.overallScore || 0) > 0 || (resumeData.analysis.issues || []).length > 0 || Object.keys(resumeData.analysis.categories || {}).length > 0);
+                  if (!hasAnalysis) {
+                      const heur = computeHirationHeuristics(resumeData as Resume);
+                      setResumeData(prev => ({ ...(prev as any), analysis: { overallScore: heur && heur.categories ? Math.round(Object.values(heur.categories).reduce((a:any,b:any)=>a+b,0) / Math.max(1, Object.values(heur.categories).length)) : 0, categories: heur.categories || {}, issues: heur.issues || [], rawOutput: null } } as Resume));
+                  }
+              } catch (e) { /* noop */ }
           } catch (err) {
               console.warn('Auto load failed', err);
           }
@@ -507,7 +787,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               skillsText
           };
           setParsedPreview(parsedObj);
-          // Immediately reflect parsed data in the preview (in-memory only).
+                // Immediately reflect parsed data in the preview (in-memory only).
           setResumeData(prev => {
               const newData = { ...prev } as any;
               newData.personalInfo = {
@@ -522,12 +802,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               }
               return newData;
           });
-          // Persist parsed data automatically (apply parsed preview)
-          try {
-            await applyParsedData(parsedObj);
-          } catch (err) {
-            console.warn('Auto-apply parsed data failed', err);
-          }
+                            // Keep parsedPreview available for user to apply manually via the Editor.
       } catch (err: any) {
           console.error('PDF parse failed', err);
           setParsedPreview(null);
@@ -562,19 +837,10 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
           newData.skills = parsed.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
       }
 
-          // Persist and create a revision
+          // Persist parsed data onto the resume row (no revision created automatically)
           try {
-          // mark parsedImportedAt timestamp so we don't re-parse
           (newData as any).parsedImportedAt = new Date().toISOString();
           await updateResume(newData.id, { data: newData, title: newData.title, lastUpdated: new Date().toISOString(), parsedImportedAt: (newData as any).parsedImportedAt });
-          const rev = {
-              id: `rev_parsed_${Date.now()}`,
-              name: 'Parsed Import',
-              createdAt: new Date().toISOString(),
-              tags: ['import', 'parsed'],
-              contentSummary: 'Initial parsed import from PDF'
-          };
-          await createResumeRevision(newData.id, rev);
                     setResumeData(newData);
                     setParsedPreview(null);
                     try {
@@ -677,12 +943,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
-                                <button 
-                    onClick={() => setShowTuneModal(true)}
-                    className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-purple-200 dark:shadow-none transition-colors flex items-center gap-2 active:scale-95 whitespace-nowrap"
-                >
-                    <Wand2 size={14} /> Tune for Job
-                </button>
+                {/* Tune control moved to AI Analysis panel */}
                                 <button onClick={handleSaveRevision} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm shadow-indigo-200 transition-colors flex items-center gap-2 active:scale-95 whitespace-nowrap">
                                     <Plus size={14} /> Save Revision
                                 </button>
@@ -743,6 +1004,40 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     <div className="mt-4 flex justify-end gap-2">
                         <button onClick={() => setIsLayoutModalOpen(false)} className="px-3 py-1 bg-white border rounded">Cancel</button>
                         <button onClick={saveLayoutChoice} className="px-3 py-1 bg-emerald-600 text-white rounded">Save</button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {suggestionModalOpen && suggestionModalIssue && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="bg-white dark:bg-gray-900 p-4 rounded shadow w-[680px] max-w-full">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                            <h3 className="text-lg font-bold mb-1">Improve: {suggestionModalIssue.title}</h3>
+                            <p className="text-xs text-slate-500 dark:text-gray-400">{suggestionModalIssue.description}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => { setSuggestionModalOpen(false); setSuggestionModalIssue(null); }} className="text-xs px-2 py-1 bg-white border rounded">Close</button>
+                        </div>
+                    </div>
+
+                    <div className="mt-4">
+                        <p className="text-xs text-slate-500 mb-2">Choose a candidate rewrite below and click <strong>Apply</strong> to overwrite the parsed data.</p>
+                        <div className="space-y-3 max-h-64 overflow-y-auto">
+                            {suggestionModalCandidates && suggestionModalCandidates.length > 0 ? (
+                                <div className="p-3 bg-slate-50 dark:bg-gray-800 border border-slate-100 dark:border-gray-700 rounded-lg">
+                                    <label className="text-xs text-slate-500 dark:text-gray-400 mb-1 block">Edit candidate (you can modify before applying):</label>
+                                    <textarea value={suggestionModalEditValue} onChange={(e) => setSuggestionModalEditValue(e.target.value)} rows={6} className="w-full p-2 rounded border text-sm bg-white dark:bg-gray-900 text-slate-900 dark:text-gray-200" />
+                                    <div className="mt-2 flex justify-end gap-2">
+                                        <button onClick={() => { setSuggestionModalOpen(false); setSuggestionModalIssue(null); }} className="text-xs px-3 py-1 bg-white border rounded">Close</button>
+                                        <button onClick={() => applySuggestionCandidate(suggestionModalIssue, suggestionModalEditValue)} className="text-xs px-3 py-1 bg-emerald-600 text-white rounded">Apply</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="p-3 text-sm text-slate-500">No candidate suggestions returned.</div>
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -859,17 +1154,45 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     )}
                     {/* Header */}
                     <div className="border-b-2 border-slate-800 pb-4 mb-6">
-                        <h1 className="text-4xl font-bold uppercase tracking-tight mb-2">{displayData.personalInfo.fullName}</h1>
+                        {inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'fullName' ? (
+                            <div className="mb-2">
+                                <input className="w-full p-2 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                <div className="mt-2 flex gap-2">
+                                    <button onClick={saveInlineEdit} className="px-3 py-1 bg-emerald-600 text-white rounded text-sm">Save</button>
+                                    <button onClick={cancelInlineEdit} className="px-3 py-1 bg-white border rounded text-sm">Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <h1 onClick={() => setInlineEdit({ section: 'personalInfo', field: 'fullName', value: displayData.personalInfo.fullName || '' })} className="text-4xl font-bold uppercase tracking-tight mb-2 cursor-text">{displayData.personalInfo.fullName}</h1>
+                        )}
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
-                            <span>{displayData.personalInfo.email}</span>
+                            {inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'email' ? (
+                                <div>
+                                    <input className="p-1 rounded border text-sm" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                    <div className="inline-flex ml-2 gap-1"><button onClick={saveInlineEdit} className="px-2 py-0.5 bg-emerald-600 text-white rounded text-xs">Save</button><button onClick={cancelInlineEdit} className="px-2 py-0.5 bg-white border rounded text-xs">Cancel</button></div>
+                                </div>
+                            ) : (
+                                <span onClick={() => setInlineEdit({ section: 'personalInfo', field: 'email', value: displayData.personalInfo.email || '' })} className="cursor-text">{displayData.personalInfo.email}</span>
+                            )}
+
                             <span className="text-slate-300">•</span>
-                            <span>{displayData.personalInfo.phone}</span>
+
+                            {inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'phone' ? (
+                                <div>
+                                    <input className="p-1 rounded border text-sm" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                    <div className="inline-flex ml-2 gap-1"><button onClick={saveInlineEdit} className="px-2 py-0.5 bg-emerald-600 text-white rounded text-xs">Save</button><button onClick={cancelInlineEdit} className="px-2 py-0.5 bg-white border rounded text-xs">Cancel</button></div>
+                                </div>
+                            ) : (
+                                <span onClick={() => setInlineEdit({ section: 'personalInfo', field: 'phone', value: displayData.personalInfo.phone || '' })} className="cursor-text">{displayData.personalInfo.phone}</span>
+                            )}
+
                             <span className="text-slate-300">•</span>
+
                             <span>{displayData.personalInfo.location}</span>
                             {displayData.personalInfo.website && (
                                 <>
                                     <span className="text-slate-300">•</span>
-                                    <span className="text-purple-600">{displayData.personalInfo.website}</span>
+                                    <span onClick={() => setInlineEdit({ section: 'personalInfo', field: 'website', value: displayData.personalInfo.website || '' })} className="text-purple-600 cursor-text">{displayData.personalInfo.website}</span>
                                 </>
                             )}
                         </div>
@@ -878,10 +1201,23 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     {/* Summary */}
                     {displayData.personalInfo.summary && (
                         <section className="mb-6">
-                            <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Professional Summary</h2>
-                            <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-line">
-                                {displayData.personalInfo.summary}
-                            </p>
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Professional Summary</h2>
+                                <button title="Improve summary with Gemini" onClick={() => handleFieldSuggest('summary', null, displayData.personalInfo.summary || '')} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                            </div>
+                            {inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'summary' ? (
+                                <div>
+                                    <textarea rows={5} className="w-full p-2 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                    <div className="mt-2 flex gap-2">
+                                        <button onClick={saveInlineEdit} className="px-3 py-1 bg-emerald-600 text-white rounded text-sm">Save</button>
+                                        <button onClick={cancelInlineEdit} className="px-3 py-1 bg-white border rounded text-sm">Cancel</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <p onClick={() => setInlineEdit({ section: 'personalInfo', field: 'summary', value: displayData.personalInfo.summary || '' })} className="text-sm leading-relaxed text-slate-700 whitespace-pre-line cursor-text">
+                                    {displayData.personalInfo.summary}
+                                </p>
+                            )}
                         </section>
                     )}
 
@@ -899,7 +1235,24 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                         <div className="text-sm text-slate-600 italic mb-2 font-medium">{exp.company}</div>
                                         <ul className="list-disc list-inside text-sm text-slate-700 space-y-1.5 marker:text-slate-400">
                                             {exp.bullets.map((bullet, i) => (
-                                                <li key={i} className="pl-1">{bullet}</li>
+                                                            <li key={i} className="pl-1 flex items-start justify-between gap-2">
+                                                                <div className="flex-1">
+                                                                {inlineEdit && inlineEdit.section === 'experience' && inlineEdit.field === 'bullet' && inlineEdit.id === exp.id && inlineEdit.index === i ? (
+                                                        <div>
+                                                            <textarea rows={3} className="w-full p-1 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                                            <div className="mt-1 flex gap-2">
+                                                                <button onClick={saveInlineEdit} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs">Save</button>
+                                                                <button onClick={cancelInlineEdit} className="px-2 py-1 bg-white border rounded text-xs">Cancel</button>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                                    <div onClick={() => setInlineEdit({ section: 'experience', field: 'bullet', id: exp.id, index: i, value: bullet })} className="cursor-text">{bullet}</div>
+                                                                )}
+                                                                </div>
+                                                                <div className="flex-shrink-0">
+                                                                    <button title="Improve this bullet with Gemini" onClick={() => handleFieldSuggest('experience', exp.id, bullet)} className="p-1 ml-2 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={14} /></button>
+                                                                </div>
+                                                            </li>
                                             ))}
                                         </ul>
                                         {/* Edit Hover Indicator - Hidden in Print */}
@@ -939,12 +1292,16 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     {/* Skills */}
                     {displayData.skills.length > 0 && (
                         <section>
-                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
+                             <div className="flex items-center justify-between">
+                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
+                                <button title="Improve skills with Gemini" onClick={() => handleFieldSuggest('skills', null, (displayData.skills || []).map((s:any)=>s.name).join(', '))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                             </div>
                              <div className="flex flex-wrap gap-2 text-sm">
                                 {displayData.skills.map(skill => (
-                                    <span key={skill.name} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium">
-                                        {skill.name}
-                                    </span>
+                                    <div key={skill.name} className="flex items-center gap-2">
+                                        <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium">{skill.name}</span>
+                                        <button title={`Improve ${skill.name}`} onClick={() => handleFieldSuggest('skills', null, skill.name)} className="p-1 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={12} /></button>
+                                    </div>
                                 ))}
                              </div>
                         </section>
@@ -983,12 +1340,17 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                 <div style={{ width: rightPanelWidth }} className="bg-white dark:bg-gray-900 border-l border-slate-200 dark:border-gray-800 flex flex-col shrink-0 animate-in slide-in-from-right duration-300 shadow-xl z-10 backdrop-blur-xl">
                     {/* Tabs */}
                     <div className="flex border-b border-slate-200 dark:border-gray-800">
-                        <button 
-                            onClick={() => setAssistantTab('analysis')}
-                            className={`flex-1 py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'analysis' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
-                        >
-                            <Sparkles size={16} /> AI Analysis
-                        </button>
+                        <div className="flex-1 flex items-center justify-center gap-2">
+                            <button 
+                                onClick={() => setAssistantTab('analysis')}
+                                className={`py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'analysis' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
+                            >
+                                <Sparkles size={16} /> AI Analysis
+                            </button>
+                            <button onClick={() => setShowTuneModal(true)} title="Tune resume" className="p-2 rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-gray-800">
+                                <PenTool size={14} />
+                            </button>
+                        </div>
                         <button 
                             onClick={() => setAssistantTab('editor')}
                             className={`flex-1 py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'editor' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
@@ -1002,8 +1364,20 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                         {assistantTab === 'analysis' ? (
                             <div className="space-y-8">
                                 <div className="flex justify-end">
-                                    <button onClick={handleAnalyze} className="text-sm px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md">Run Analysis</button>
+                                    <button onClick={handleAnalyze} disabled={analyzeCooldown} className={`text-sm px-3 py-1 ${analyzeCooldown ? 'bg-purple-300 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'} text-white rounded-md`}>{analyzeCooldown ? 'Analyze (cooling)' : 'Run Analysis'}</button>
                                 </div>
+                                {suggestionApplySuccess && (
+                                    <div className="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-md border border-emerald-100 dark:border-emerald-800 text-sm">
+                                        <div className="flex items-start justify-between">
+                                            <div>
+                                                <div className="font-semibold text-emerald-800 dark:text-emerald-300">Applied: {suggestionApplySuccess.title}</div>
+                                                <div className="text-xs text-slate-600 dark:text-gray-300 mt-1">Rewrote {suggestionApplySuccess.targetSection || 'content'} — showing change below.</div>
+                                                <pre className="whitespace-pre-wrap text-xs bg-white dark:bg-gray-900 p-2 rounded mt-2 border text-slate-700 dark:text-gray-200">{suggestionApplySuccess.oldValue ? `${suggestionApplySuccess.oldValue}\n→\n${suggestionApplySuccess.newValue}` : suggestionApplySuccess.newValue}</pre>
+                                            </div>
+                                            <button onClick={() => setSuggestionApplySuccess(null)} className="text-xs px-2 py-1 bg-white border rounded">Dismiss</button>
+                                        </div>
+                                    </div>
+                                )}
                                 {/* Score Card (Fixed SVG) */}
                                 <div className="text-center relative py-4">
                                     <div className="inline-flex items-center justify-center w-32 h-32 relative">
@@ -1038,12 +1412,12 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     </p>
                                 </div>
 
-                                {/* Category Bars */}
-                                <div className="grid grid-cols-2 gap-3">
+                                {/* Category Bars - horizontally scrollable for many categories */}
+                                <div className="flex gap-3 overflow-x-auto pb-2 -mx-3 px-3">
                                     {Object.entries(resumeData.analysis?.categories || {}).map(([key, val]) => {
                                         const scoreVal = Number(val as any) || 0;
                                         return (
-                                            <div key={key} className="bg-white dark:bg-gray-800 p-3 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
+                                            <div key={key} className="min-w-[160px] flex-shrink-0 bg-white dark:bg-gray-800 p-3 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
                                                 <div className="flex justify-between text-xs mb-2">
                                                     <span className="capitalize font-semibold text-slate-600 dark:text-gray-300">{key}</span>
                                                     <span className="font-bold text-slate-800 dark:text-white">{scoreVal}</span>
@@ -1058,6 +1432,64 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                         );
                                     })}
                                 </div>
+
+                                {/* Heuristic Sections (Hiration-like): Structure, Skills, Contact, Reverse Chronology, Bullets, Formatting */}
+                                <div className="flex flex-col gap-4">
+                                    {[
+                                        { key: 'structure', title: 'Structure' },
+                                        { key: 'skills', title: 'Skill Level Analysis' },
+                                        { key: 'contact', title: 'Contact Info' },
+                                        { key: 'reverseChron', title: 'Reverse Chronology' },
+                                        { key: 'bullets', title: 'Bullet Analysis' },
+                                        { key: 'formatting', title: 'Formatting' }
+                                    ].map(section => {
+                                        const scoreVal = Number(resumeData.analysis?.categories?.[section.key] || 0);
+                                        const related = (resumeData.analysis?.issues || []).filter((i:any) => i.category === section.key || (i.source === 'heuristic' && i.category == null && String(i.id || '').includes(section.key)));
+                                        return (
+                                            <div key={section.key} className="w-full bg-white dark:bg-gray-800 p-4 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <div>
+                                                        <div className="text-xs font-bold text-slate-600 dark:text-gray-300">{section.title}</div>
+                                                        <div className="text-[10px] text-slate-400">{scoreVal}%</div>
+                                                    </div>
+                                                    <div className={`px-2 py-1 rounded-md text-xs font-bold ${scoreVal >= 80 ? 'bg-emerald-100 text-emerald-700' : scoreVal >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{scoreVal}</div>
+                                                </div>
+                                                <div className="text-xs text-slate-500 dark:text-gray-400 mb-3">{section.title} heuristics and suggestions.</div>
+                                                <div className="flex flex-col gap-3">
+                                                    {related.length === 0 ? (
+                                                        <div className="text-sm text-slate-500">No issues detected.</div>
+                                                    ) : related.map((issue:any) => (
+                                                        <div key={issue.id} className="p-3 bg-slate-50 dark:bg-gray-900 rounded border border-slate-100 dark:border-gray-700 flex flex-col gap-2">
+                                                            <div>
+                                                                <div className="text-sm font-semibold text-slate-800 dark:text-gray-100">{issue.title}</div>
+                                                                <div className="text-xs text-slate-500 dark:text-gray-400">{issue.description}</div>
+                                                                {issue.suggestion && <div className="mt-2 text-xs text-slate-600 dark:text-gray-300">Suggestion: {issue.suggestion}</div>}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                {issue.fixAction ? (
+                                                                    <button onClick={() => handleApplyFix(issue)} className="text-xs px-2 py-1 bg-purple-600 text-white rounded">Apply Fix</button>
+                                                                ) : (
+                                                                    <button onClick={() => handleSuggestRewrite(issue)} className="text-xs px-2 py-1 bg-white border rounded">Suggest Rewrite</button>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Raw AI output (if present) - collapsible */}
+                                {resumeData.analysis?.rawOutput && (
+                                    <div className="mt-3 p-3 bg-white dark:bg-gray-900 border border-slate-100 dark:border-gray-800 rounded-lg text-xs">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <strong className="text-sm">AI Raw Output</strong>
+                                            <button onClick={() => { setResumeData(prev => ({ ...(prev as any), analysis: { ...(prev.analysis || {}), rawOutput: null } } as Resume)); }} className="text-xs px-2 py-0.5 bg-white border rounded">Hide</button>
+                                        </div>
+                                        <pre className="whitespace-pre-wrap max-h-40 overflow-y-auto text-[12px] text-slate-700 dark:text-gray-200">{resumeData.analysis.rawOutput}</pre>
+                                    </div>
+                                )}
 
                                 {/* Issues List */}
                                 <div>
@@ -1482,5 +1914,5 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
             </div>
         )}
     </div>
-  );
+  );   
 };
