@@ -5,6 +5,7 @@ import {
   AlertCircle, CheckCircle2, Check, Plus, Trash2, GripVertical
 } from 'lucide-react';
 import { Resume, AnalysisIssue } from '../types';
+import AppearancePanel from '../components/AppearancePanel';
 import { getResumeById, updateResume, createResumeRevision, generatePdf } from '../src/api';
 import supabase from '../src/lib/supabaseClient';
 
@@ -113,6 +114,76 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
             return { categories, issues };
         };
+      // sanitize parsed summary text so trailing sections don't leak into the "Professional Summary" block
+      // reuse sanitizeSummary defined later in the render helpers section
+
+      // sanitize parsed summary text so trailing sections don't leak into the "Professional Summary" block
+      const sanitizeSummary = (s?: string | null) => {
+          if (!s) return '';
+          const raw = String(s || '');
+          const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          if (!lines.length) return '';
+
+          const headerRe = /\b(PROFESSIONAL SUMMARY|PROFESSIONAL SUMMARY:|SUMMARY|ABOUT|WORK|WORK EXPERIENCE|EXPERIENCE|CONTACT|EDUCATION|SKILLS|LANGUAGES|INTERESTS)\b/i;
+
+          // If there's an ABOUT or SUMMARY header, return the block immediately after it until the next header
+          const aboutIdx = lines.findIndex(l => /\bABOUT\b/i.test(l) || /\bPROFESSIONAL SUMMARY\b/i.test(l) || /\bSUMMARY\b/i.test(l));
+          if (aboutIdx >= 0) {
+              const start = aboutIdx + 1;
+              let end = lines.slice(start).findIndex(l => headerRe.test(l));
+              if (end === -1) end = lines.length - start;
+              const block = lines.slice(start, start + end).join('\n').trim();
+              if (block) return block;
+          }
+
+          // Otherwise, return the leading paragraph(s) up to the first header
+          const firstHeaderIdx = lines.findIndex(l => headerRe.test(l) || (/^[A-Z0-9 \-]{4,}$/.test(l) && l === l.toUpperCase() && l.length < 60));
+          if (firstHeaderIdx > 0) {
+              return lines.slice(0, firstHeaderIdx).join('\n').trim();
+          }
+
+          // Fallback: return the first 3 non-empty lines joined
+          return lines.slice(0, 3).join('\n').trim();
+      };
+
+      // Extract ABOUT block from a raw full-text string. Stops when encountering
+      // common section starters (WORK, SKILLS, EDUCATION, etc.) or an ALL-CAPS header.
+      const extractAboutFromText = (fullText?: string | null) => {
+          if (!fullText) return '';
+          const lines = String(fullText).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          const aboutIdx = lines.findIndex(l => /\bABOUT\b/i.test(l) || /\bPROFESSIONAL SUMMARY\b/i.test(l) || /\bSUMMARY\b/i.test(l) || /\bPROFILE\b/i.test(l));
+          if (aboutIdx >= 0) {
+              const out: string[] = [];
+              for (let i = aboutIdx + 1; i < lines.length; i++) {
+                  const ln = lines[i];
+                  if (!ln) continue;
+                  const low = ln.toLowerCase().replace(/[\s:\-–—]+/g, ' ').trim();
+                  if (/^(skills|experience|education|languages|interests|contact|work|professional|employment)$/.test(low)) break;
+                  if (/^[A-Z0-9 \-]{2,}$/.test(ln) && ln === ln.toUpperCase() && ln.split(' ').length <= 6) break;
+                  // exclude lines that look like experience entries (e.g., start with a dash or bullet)
+                  if (/^[-•\u2022\*]\s*/.test(ln)) break;
+                  out.push(ln);
+              }
+              const para = out.join(' ').replace(/\s+/g, ' ').trim();
+              return para;
+          }
+          return '';
+      };
+
+      // Always prefer the ABOUT block extracted from the full text when available.
+      const chooseBestSummary = (primary?: string | null, fallbackFullText?: string | null) => {
+          // 1) If the full parsed text contains an ABOUT block, use it (strong preference)
+          const aboutFromText = extractAboutFromText(fallbackFullText || '');
+          if (aboutFromText && aboutFromText.length > 30) return aboutFromText;
+
+          // 2) Otherwise fall back to sanitized primary or sanitized fallback
+          const p = sanitizeSummary(primary || '');
+          const f = sanitizeSummary(fallbackFullText || '');
+          if ((p || '').length >= 80) return p;
+          if ((f || '').length > (p || '').length) return f;
+          return p || f || '';
+      };
+
       // If the server persisted an auto-parsed revision but top-level personalInfo is empty,
       // merge the parsed revision into local state for immediate display (do not persist automatically).
       useEffect(() => {
@@ -126,17 +197,17 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               if (!parsedRev || !parsedRev.parsed) return;
 
               const parsed = parsedRev.parsed;
-              // Heuristic: derive name from parsed.name, else first non-empty line of parsed.text
-              const firstLine = (rawText?: string) => {
-                  if (!rawText) return null;
-                  const lines = String(rawText).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-                  return lines.length ? lines[0] : null;
-              };
-
-              const derivedName = parsed.name || ((parsed.firstName && parsed.lastName) ? `${parsed.firstName} ${parsed.lastName}` : null) || parsed.fullName || firstLine(parsed.text) || null;
-              const derivedSummary = parsed.summary || (parsed.text ? String(parsed.text).slice(0, 1000) : null);
+              // Heuristic: derive name from parsed.name, else parsed.firstName/lastName, else from email local-part
+              const capitalize = (s?: string) => String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1).toLowerCase();
+              // Do NOT auto-derive a display full name from the email local-part.
+              // Only accept explicit parsed name or first/last combo (avoid showing contact handles as the user's name).
+              const derivedName = parsed.name || ((parsed.firstName && parsed.lastName) ? `${parsed.firstName} ${parsed.lastName}` : null) || parsed.fullName || null;
+              const rawSummary = parsed.summary || (parsed.text ? String(parsed.text) : null);
+              const derivedSummary = chooseBestSummary(parsed.summary, parsed.text ? String(parsed.text) : null);
               const derivedEmail = parsed.email || null;
               const derivedPhone = parsed.phone || null;
+              const derivedWebsite = parsed.website || null;
+              const derivedLocation = parsed.location || null;
 
               setResumeData(prev => {
                   const newData: any = { ...(prev as any) };
@@ -145,8 +216,13 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                       fullName: derivedName || newData.personalInfo.fullName,
                       email: derivedEmail || newData.personalInfo.email,
                       phone: derivedPhone || newData.personalInfo.phone,
+                      website: derivedWebsite || newData.personalInfo.website,
+                      location: derivedLocation || newData.personalInfo.location,
                       summary: derivedSummary || newData.personalInfo.summary,
                   };
+                  // Merge parsed experience/education into preview state so UI renders them in separate sections
+                  if (parsed.experience && Array.isArray(parsed.experience) && parsed.experience.length) newData.experience = normalizeParsedExperience(parsed.experience);
+                  if (parsed.education && Array.isArray(parsed.education) && parsed.education.length) newData.education = parsed.education;
                   if (parsed.skills) {
                       newData.skills = Array.isArray(parsed.skills) ? parsed.skills : String(parsed.skills).split(',').map((s:string) => ({ name: s.trim(), level: 'Intermediate' }));
                   } else if (parsed.skillsText) {
@@ -171,7 +247,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     // Right panel dynamic width (px)
     const [rightPanelWidth, setRightPanelWidth] = useState<number>(384);
     const resizingRef = React.useRef<{ active: boolean; startX: number; startWidth: number }>({ active: false, startX: 0, startWidth: 384 });
-    const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor' | 'tune'>('analysis');
+    const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor' | 'tune' | 'appearance'>('analysis');
   const [fixingIssueId, setFixingIssueId] = useState<string | null>(null);
     // Suggestion modal state
     const [suggestionModalOpen, setSuggestionModalOpen] = useState(false);
@@ -239,6 +315,47 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     const [parsedPreview, setParsedPreview] = useState<{ name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null>(null);
     const [parseError, setParseError] = useState<string | null>(null);
 
+    // Appearance settings (preview-only until Save Revision)
+    interface AppearanceSettings {
+        template: 'classic' | 'modern' | 'compact';
+        color: 'purple' | 'blue' | 'green' | 'black';
+        fontSize: 'small' | 'medium' | 'large';
+        fontFamily: 'system' | 'serif' | 'mono';
+        spacing: 'compact' | 'normal' | 'relaxed';
+        columns: 1 | 2;
+        showSections: {
+            summary: boolean;
+            experience: boolean;
+            education: boolean;
+            skills: boolean;
+            languages: boolean;
+            interests: boolean;
+        };
+        headerStyle: 'uppercase' | 'titlecase' | 'hide';
+    }
+
+    const defaultAppearance: AppearanceSettings = {
+        template: 'classic',
+        color: 'purple',
+        fontSize: 'medium',
+        fontFamily: 'system',
+        spacing: 'normal',
+        columns: 1,
+        showSections: { summary: true, experience: true, education: true, skills: true, languages: true, interests: true },
+        headerStyle: 'uppercase'
+    };
+
+    const [appearance, setAppearance] = useState<AppearanceSettings>(defaultAppearance);
+
+    // Initialize appearance from resumeData (preview only)
+    useEffect(() => {
+        try {
+            const ap = (resumeData as any).data?.appearance || (resumeData as any).appearance || null;
+            if (ap) setAppearance(prev => ({ ...prev, ...(ap as Partial<AppearanceSettings>) }));
+            else setAppearance(defaultAppearance);
+        } catch (e) { setAppearance(defaultAppearance); }
+    }, [resumeData.id, JSON.stringify((resumeData as any).data?.appearance || (resumeData as any).appearance || {})]);
+
     // removed stale initialResume effect
 
   // --- Handlers ---
@@ -247,6 +364,155 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
   const handlePrint = () => {
       window.print();
+  };
+
+  // Normalize parsed experience entries from the server or PDF parser.
+  // This attempts to merge fragmented entries (where bullets or date lines
+  // were split into separate parsed objects) and remove obvious noise
+  // such as contact lines accidentally captured as experience items.
+  const normalizeParsedExperience = (src?: any[] | null) => {
+      if (!Array.isArray(src)) return [];
+      const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+      const phoneRe = /(\+?\d[\d\-\s()]{6,}\d)/;
+      const urlRe = /(https?:\/\/)?([\w.-]+\.[a-z]{2,})/i;
+      const bulletRe = /^\s*[-–—•\u2022\*]\s*/;
+      const dateLikeRe = /\b(\d{4}|\d{4}–|\d{4}\s*[-–]\s*\d{4}|present|present)\b/i;
+
+      const out: any[] = [];
+      for (let i = 0; i < src.length; i++) {
+          const raw = src[i] || {};
+              let title = String(raw.title || '').trim();
+              let date = String(raw.date || '').trim();
+              const bullets = Array.isArray(raw.bullets) ? raw.bullets.map((b:string) => String(b).trim()).filter(Boolean) : [];
+              // preserve company/role if provided by server parser
+              let company = raw.company ? String(raw.company).trim() : '';
+              let role = raw.role ? String(raw.role).trim() : '';
+              // If server didn't provide company/role, attempt a conservative split from title
+              if (!company && !role && title && title.includes('/')) {
+                  const parts = title.split(/\s*\/\s*/);
+                  if (parts.length >= 2) {
+                      // heuristic: left is company, right is role
+                      company = parts[0].trim();
+                      role = parts.slice(1).join(' / ').trim();
+                  }
+              }
+
+          // Skip empty/garbage entries that are just contact info
+          if ((!title || title.length < 2) && (!date || date.length < 2) && bullets.length === 0) continue;
+          if (emailRe.test(title) || phoneRe.test(title) || urlRe.test(title)) continue;
+          if (emailRe.test(date) || phoneRe.test(date) || urlRe.test(date)) { date = ''; }
+
+          // Clean leading bullet chars from titles
+          if (bulletRe.test(title)) title = title.replace(bulletRe, '').trim();
+
+          const cur = { id: raw.id || `exp_${i}_${Math.random().toString(36).slice(2,6)}`, title, company, role, date, bullets: bullets.slice() };
+
+          // If looks like a continuation (title starts with a bullet or lowercase conjunction)
+          const isContinuation = bulletRe.test(raw.title || '') || (/^(&|and |or |\-|–|—)/i.test(raw.title || '')) || (title && title[0] === title[0].toLowerCase() && title.split(' ').length < 10 && !dateLikeRe.test(title));
+
+          if (out.length && (isContinuation || (!cur.bullets.length && title && title.length < 120 && title.split(' ').length < 12 && !/\/[A-Z]/.test(title) && !/^[A-Z\s]+$/.test(title)))) {
+              // Merge into previous entry conservatively
+              const prev = out[out.length - 1];
+              // If current has a date that looks like a date and prev lacks one, set it
+              if (!prev.date && date && dateLikeRe.test(date)) prev.date = date;
+              // If current title looks like a short descriptive line, add it as a bullet
+              if (title && !prev.bullets.includes(title)) prev.bullets.push(title);
+              // preserve company/role on previous if current provides them
+              if (!prev.company && company) prev.company = company;
+              if (!prev.role && role) prev.role = role;
+              // Append any bullets
+              for (const b of cur.bullets) if (b && !prev.bullets.includes(b)) prev.bullets.push(b);
+              continue;
+          }
+
+          // If title seems like "LOCATION / DATE" and previous exists, merge into previous
+          if (out.length && /[,\/]\s*[A-Za-z]{2,}/.test(title) && dateLikeRe.test(title)) {
+              const prev = out[out.length - 1];
+              if (!prev.date) prev.date = title;
+              continue;
+          }
+
+          out.push(cur);
+      }
+
+      // Second pass: merge adjacent fragments where the following entry is
+      // clearly a location/date line or a short continuation. This helps when
+      // the server splits a role, location/date and bullets into separate items.
+      const merged: any[] = [];
+      for (let i = 0; i < out.length; i++) {
+          const cur = { ...out[i] };
+          // Skip obvious section headers captured as experience
+          const tlow = String(cur.title || '').toLowerCase().trim();
+          if (/^contact$/.test(tlow) || /^skills?$/.test(tlow) || /^education$/.test(tlow)) continue;
+
+          // Look ahead to next fragment
+          while (i + 1 < out.length) {
+              const nxt = out[i + 1];
+              if (!nxt) break;
+              const nxtTitle = String(nxt.title || '').trim();
+              const nxtLower = nxtTitle.toLowerCase();
+              const isLocationLike = /[A-Za-z .'\-]+,\s*[A-Za-z]{2}\b/.test(nxtTitle) || /\b(jr|sr|llc)\b/i.test(nxtTitle) || /\b(remote|remote \/|remote\b)/i.test(nxtTitle);
+              const isDateLike = /\b(\d{4}|\d{4}–|\d{4}\s*[-–]\s*\d{4}|present|present)\b/i.test(nxtTitle) || /\d{4}–Present/i.test(nxtTitle);
+              const isShortContinuation = nxtTitle.length > 0 && nxtTitle.length < 120 && nxtTitle.split(' ').length < 12 && /^[a-z\-&\(]/.test(nxtTitle);
+              const isBulletOnly = Array.isArray(nxt.bullets) && nxt.bullets.length > 0 && (!nxt.title || nxt.title.length < 5);
+
+              if (isLocationLike || isDateLike) {
+                  // merge location/date into cur.date if cur has no date
+                  if (!cur.date || cur.date.length < 4) cur.date = cur.date ? cur.date + ' / ' + nxtTitle : nxtTitle;
+                  // only absorb bullets if the next fragment does not look like a distinct job header
+                  const nxtLooksLikeTitle = Boolean(nxt.title && (nxt.title.includes('/') || nxt.title === String(nxt.title).toUpperCase()));
+                  if (!nxtLooksLikeTitle && Array.isArray(nxt.bullets) && nxt.bullets.length) cur.bullets.push(...nxt.bullets.filter(Boolean));
+                  // absorb company/role if present on next fragment
+                  if (!cur.company && nxt.company) cur.company = nxt.company;
+                  if (!cur.role && nxt.role) cur.role = nxt.role;
+                  i++; // consume next
+                  continue;
+              }
+              if (isShortContinuation || isBulletOnly) {
+                  // treat nxt title as a broken bullet or continuation — but only if
+                  // the next fragment does not itself look like a standalone job header
+                  const nxtLooksLikeTitle = Boolean(nxt.title && (nxt.title.includes('/') || nxt.title === String(nxt.title).toUpperCase()));
+                  if (!nxtLooksLikeTitle) {
+                      if (nxtTitle && !cur.bullets.includes(nxtTitle)) cur.bullets.push(nxtTitle);
+                      if (Array.isArray(nxt.bullets) && nxt.bullets.length) cur.bullets.push(...nxt.bullets.filter(Boolean));
+                      if (!cur.company && nxt.company) cur.company = nxt.company;
+                      if (!cur.role && nxt.role) cur.role = nxt.role;
+                      i++; // consume next
+                      continue;
+                  }
+              }
+              break;
+          }
+
+          // Clean/merge broken bullets inside cur.bullets: join lines where a bullet
+          // looks like it was split across lines (next bullet starts lowercase or
+          // previous bullet doesn't end with punctuation).
+          const cleanedBullets: string[] = [];
+          for (let bi = 0; bi < (cur.bullets || []).length; bi++) {
+              let b = String(cur.bullets[bi] || '').trim();
+              if (!b) continue;
+              // If next bullet exists and starts with a lowercase or ampersand, merge
+              const nextB = String((cur.bullets || [])[bi + 1] || '').trim();
+              if (nextB && /^[a-z&]/.test(nextB) && !/[.!?]$/.test(b)) {
+                  // merge b and nextB
+                  b = (b + ' ' + nextB).replace(/\s+/g, ' ').trim();
+                  bi++; // skip next bullet
+              }
+              // If bullet starts with a dash char, strip it
+              b = b.replace(/^[-–—]\s*/, '');
+              cleanedBullets.push(b);
+          }
+          cur.bullets = Array.from(new Set(cleanedBullets));
+          merged.push(cur);
+      }
+
+      // Final pass: remove tiny stray entries
+      return merged.filter(e => {
+          if (!e.title && (!e.bullets || e.bullets.length === 0)) return false;
+          if (String(e.title || '').length > 0 && String(e.title).trim().length < 3 && (!e.bullets || e.bullets.length === 0)) return false;
+          if (emailRe.test(String(e.title || '')) || phoneRe.test(String(e.title || ''))) return false;
+          return true;
+      });
   };
 
     // 1. Handle AI Fix Application
@@ -854,11 +1120,11 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               skillsText = skillsMatch[1].split(/[\n,•·]/).map((s: string) => s.trim()).filter(Boolean).slice(0, 30).join(', ');
           }
 
-          const parsedObj = {
+              const parsedObj = {
               name: nameCandidate,
               email: emailMatch?.[0] || '',
               phone: phoneMatch?.[0] || '',
-              summary: fullText.slice(0, 1000),
+              summary: sanitizeSummary(fullText).slice(0, 2000),
               skillsText
           };
           setParsedPreview(parsedObj);
@@ -870,7 +1136,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                   fullName: nameCandidate || newData.personalInfo.fullName,
                   email: emailMatch?.[0] || newData.personalInfo.email,
                   phone: phoneMatch?.[0] || newData.personalInfo.phone,
-                  summary: fullText.slice(0, 1000) || newData.personalInfo.summary,
+                  summary: sanitizeSummary(fullText).slice(0, 2000) || newData.personalInfo.summary,
               };
               if (skillsText) {
                   newData.skills = skillsText.split(',').map((s: string) => ({ name: s.trim(), level: 'Intermediate' }));
@@ -906,10 +1172,13 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
           fullName: parsed.name || ((parsed.firstName && parsed.lastName) ? `${parsed.firstName} ${parsed.lastName}` : null) || newData.personalInfo.fullName,
           email: parsed.email || newData.personalInfo.email,
           phone: parsed.phone || newData.personalInfo.phone,
-          summary: parsed.summary ? (parsed.summary.slice(0, 1000)) : newData.personalInfo.summary,
+          summary: chooseBestSummary(parsed.summary, parsed.text ? String(parsed.text) : null) || newData.personalInfo.summary,
       };
       if (parsed.skillsText) {
           newData.skills = parsed.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
+      }
+      if (parsed.experience && Array.isArray(parsed.experience)) {
+          newData.experience = normalizeParsedExperience(parsed.experience).map((e:any) => ({ id: e.id, role: e.role || e.title || '', company: e.company || '', date: e.date || '', bullets: e.bullets || [] }));
       }
       if (parsed.languages) {
           const src = Array.isArray(parsed.languages) ? parsed.languages : String(parsed.languages).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
@@ -997,6 +1266,8 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
   const strokeDashoffset = circumference - (score / 100) * circumference;
   const scoreColor = score >= 80 ? 'text-emerald-500' : score >= 60 ? 'text-amber-500' : 'text-rose-500';
   const strokeColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#f43f5e';
+    
+
     // If previewRevision is set, derive a display data object to render instead of live resumeData
     const displayData = React.useMemo(() => {
         if (!previewRevision) return resumeData;
@@ -1006,10 +1277,65 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         const copy: any = { ...resumeData };
         if (rev.parsed) {
             const parsedFull = rev.parsed.name || ((rev.parsed.firstName && rev.parsed.lastName) ? `${rev.parsed.firstName} ${rev.parsed.lastName}` : null);
-            copy.personalInfo = { ...copy.personalInfo, fullName: parsedFull || copy.personalInfo.fullName, email: rev.parsed.email || copy.personalInfo.email, phone: rev.parsed.phone || copy.personalInfo.phone, summary: rev.parsed.summary || copy.personalInfo.summary };
+            copy.personalInfo = { ...copy.personalInfo, fullName: parsedFull || copy.personalInfo.fullName, email: rev.parsed.email || copy.personalInfo.email, phone: rev.parsed.phone || copy.personalInfo.phone, summary: chooseBestSummary(rev.parsed.summary, rev.parsed.text) || copy.personalInfo.summary };
             if (rev.parsed.skills) {
                 copy.skills = Array.isArray(rev.parsed.skills) ? rev.parsed.skills : String(rev.parsed.skills).split(',').map((s:string)=>({ name: s.trim(), level: 'Intermediate' }));
             }
+                if (rev.parsed.experience && Array.isArray(rev.parsed.experience)) {
+                    const normalized = normalizeParsedExperience(rev.parsed.experience);
+                    copy.experience = normalized.map((e:any) => {
+                        const rawTitle = String(e.title || e.role || '').trim();
+                        let company = String(e.company || '').trim();
+                        let role = '';
+                        if (rawTitle.includes('/')) {
+                            const parts = rawTitle.split('/').map((p:string) => p.trim()).filter(Boolean);
+                            if (parts.length >= 2) {
+                                company = company || parts[0];
+                                role = parts.slice(1).join(' / ');
+                            } else {
+                                role = rawTitle;
+                            }
+                        } else {
+                            role = rawTitle;
+                        }
+                        const date = String(e.date || e.period || '').trim();
+                        let bullets: string[] = [];
+                        if (Array.isArray(e.bullets)) bullets = e.bullets.slice();
+                        else if (typeof e.bullets === 'string') bullets = e.bullets.split('\n').map((b:string)=>b.trim()).filter(Boolean);
+                        // Filter out emails/phones/urls and obvious other-job titles captured as bullets
+                        bullets = bullets.filter(b => {
+                            if (!b) return false;
+                            if (/@/.test(b)) return false;
+                            if (/\d{3}[\.\-\s]\d{3}[\.\-\s]\d{4}/.test(b)) return false;
+                            if (/https?:\/\//i.test(b) || /\.[a-z]{2,}$/i.test(b)) return false;
+                            // Drop bullets that look like job titles (ALL CAPS or contain '/' with uppercase tokens)
+                            if (/^[A-Z0-9 \/&\-]{4,}$/.test(b) && b === b.toUpperCase()) return false;
+                            if (/\/[A-Z]/.test(b)) return false;
+                            if (/^contact\b/i.test(b)) return false;
+                            return true;
+                        });
+                        // Join broken bullets where next line starts lowercase or '&'
+                        const joined: string[] = [];
+                        for (let bi = 0; bi < bullets.length; bi++) {
+                            let cur = bullets[bi];
+                            const next = bullets[bi + 1] || '';
+                            if (next && /^[a-z&]/.test(next) && !/[.!?]$/.test(cur)) {
+                                cur = (cur + ' ' + next).replace(/\s+/g, ' ').trim();
+                                bi++; // skip next merged
+                            }
+                            joined.push(cur.replace(/^[-–—]\s*/, '').trim());
+                        }
+                        bullets = joined;
+                        return { id: e.id || Math.random().toString(36).slice(2,9), role: (role || '').trim(), company: (company || '').trim(), date, bullets };
+                    }).filter((ee:any) => {
+                        if (!ee.role && !ee.company && (!ee.bullets || !ee.bullets.length)) return false;
+                        if (/@/.test(String(ee.role)) || /@/.test(String(ee.company)) || /\d{3}[\.\-\s]\d{3}[\.\-\s]\d{4}/.test(String(ee.role)) || /\d{3}[\.\-\s]\d{3}[\.\-\s]\d{4}/.test(String(ee.company))) return false;
+                        return true;
+                    });
+                }
+                if (rev.parsed.education && Array.isArray(rev.parsed.education)) {
+                    copy.education = rev.parsed.education.map((ed:any) => ({ id: ed.id || Math.random().toString(36).slice(2,9), school: ed.school || ed.institution || '', degree: ed.degree || '', date: ed.date || '' }));
+                }
             if (rev.parsed.languages) {
                 // normalize parsed languages to objects { name, proficiency }
                 const src = Array.isArray(rev.parsed.languages) ? rev.parsed.languages : String(rev.parsed.languages).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
@@ -1110,12 +1436,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                 >
                     <RefreshCw size={14} /> {isGeneratingPdf ? 'Regenerating...' : 'Regenerate'}
                 </button>
-                <button
-                    onClick={openLayoutModal}
-                    className="px-2 py-1 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-700 text-slate-700 dark:text-gray-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
-                >
-                    <PenTool size={14} /> Layout
-                </button>
+                
                 {/* parsing is automatic on load; status shown via notification */}
                 <button 
                   onClick={() => setIsRightPanelOpen(!isRightPanelOpen)}
@@ -1276,7 +1597,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                             let newData: any = { ...resumeData };
                                             if (rev.data) newData = { ...newData, ...(rev.data || {}) };
                                             else if (rev.parsed) {
-                                                newData.personalInfo = { ...newData.personalInfo, fullName: rev.parsed.name || newData.personalInfo.fullName, email: rev.parsed.email || newData.personalInfo.email, phone: rev.parsed.phone || newData.personalInfo.phone, summary: rev.parsed.summary || newData.personalInfo.summary };
+                                                newData.personalInfo = { ...newData.personalInfo, fullName: rev.parsed.name || newData.personalInfo.fullName, email: rev.parsed.email || newData.personalInfo.email, phone: rev.parsed.phone || newData.personalInfo.phone, summary: chooseBestSummary(rev.parsed.summary, rev.parsed.text) || newData.personalInfo.summary };
                                                 if (rev.parsed.skills) newData.skills = Array.isArray(rev.parsed.skills) ? rev.parsed.skills : (String(rev.parsed.skills).split(',').map((s:string)=>({ name: s.trim(), level: 'Intermediate' })));
                                             }
                                             await updateResume(newData.id, { data: newData, lastUpdated: new Date().toISOString() });
@@ -1338,17 +1659,18 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     <span onClick={() => setInlineEdit({ section: 'personalInfo', field: 'website', value: displayData.personalInfo.website || '' })} className="text-purple-600 cursor-text">{displayData.personalInfo.website}</span>
                                 </>
                             )}
+                            {/* Top education removed from header — education shows in Education section below */}
                         </div>
                     </div>
 
                     {/* Summary */}
-                    {displayData.personalInfo.summary && (
-                        <section className="mb-6">
-                            <div className="flex items-center justify-between">
-                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Professional Summary</h2>
-                                <button title="Improve summary with Gemini" onClick={() => handleFieldSuggest('summary', null, displayData.personalInfo.summary || '')} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
-                            </div>
-                            {inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'summary' ? (
+                    <section className="mb-6">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Professional Summary</h2>
+                            <button title="Improve summary with Gemini" onClick={() => handleFieldSuggest('summary', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.personalInfo.summary ? (
+                            inlineEdit && inlineEdit.section === 'personalInfo' && inlineEdit.field === 'summary' ? (
                                 <div>
                                     <textarea rows={5} className="w-full p-2 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
                                     <div className="mt-2 flex gap-2">
@@ -1360,45 +1682,55 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                 <p onClick={() => setInlineEdit({ section: 'personalInfo', field: 'summary', value: displayData.personalInfo.summary || '' })} className="text-sm leading-relaxed text-slate-700 whitespace-pre-line cursor-text">
                                     {displayData.personalInfo.summary}
                                 </p>
-                            )}
-                        </section>
-                    )}
+                            )
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No professional summary detected. Use the suggestion button to generate a summary from your resume.</div>
+                        )}
+                    </section>
 
                     {/* Experience */}
-                    {displayData.experience.length > 0 && (
-                        <section className="mb-6">
+                    <section className="mb-6">
+                        <div className="flex items-center justify-between">
                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Experience</h2>
-                            <div className="space-y-5">
-                                {displayData.experience.map((exp) => (
-                                    <div key={exp.id} className="group relative rounded hover:bg-purple-50/30 transition-colors -mx-3 px-3 py-2">
-                                        <div className="flex justify-between items-baseline mb-1">
-                                            <h3 className="font-bold text-slate-800 text-base">{exp.role}</h3>
-                                            <span className="text-sm text-slate-600 font-medium">{exp.date}</span>
+                            <button title="Improve experience with Gemini" onClick={() => handleFieldSuggest('experience', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.experience && displayData.experience.length > 0 ? (
+                            <div className="space-y-6">
+                                {displayData.experience.map((exp:any) => (
+                                    <div key={exp.id} className="group relative rounded transition-colors -mx-3 px-3 py-3 bg-white/0 hover:bg-slate-50">
+                                        <div className="flex justify-between items-start mb-1">
+                                            <div className="min-w-0">
+                                                <h3 className="text-base font-semibold text-slate-800 leading-tight">{exp.role || exp.title || ''}</h3>
+                                                {exp.company && <div className="text-sm text-slate-600 mt-0.5">{exp.company}</div>}
+                                            </div>
+                                            <div className="flex-shrink-0 text-sm text-slate-600 ml-4">{exp.date}</div>
                                         </div>
-                                        <div className="text-sm text-slate-600 italic mb-2 font-medium">{exp.company}</div>
-                                        <ul className="list-disc list-inside text-sm text-slate-700 space-y-1.5 marker:text-slate-400">
-                                            {exp.bullets.map((bullet, i) => (
-                                                            <li key={i} className="pl-1 flex items-start justify-between gap-2">
-                                                                <div className="flex-1">
-                                                                {inlineEdit && inlineEdit.section === 'experience' && inlineEdit.field === 'bullet' && inlineEdit.id === exp.id && inlineEdit.index === i ? (
-                                                        <div>
-                                                            <textarea rows={3} className="w-full p-1 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
-                                                            <div className="mt-1 flex gap-2">
-                                                                <button onClick={saveInlineEdit} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs">Save</button>
-                                                                <button onClick={cancelInlineEdit} className="px-2 py-1 bg-white border rounded text-xs">Cancel</button>
+
+                                        {exp.bullets && exp.bullets.length > 0 && (
+                                            <ul className="list-disc ml-5 mt-2 space-y-1 text-sm text-slate-700">
+                                                {exp.bullets.map((bullet:string, i:number) => (
+                                                    <li key={i} className="relative">
+                                                        {inlineEdit && inlineEdit.section === 'experience' && inlineEdit.field === 'bullet' && inlineEdit.id === exp.id && inlineEdit.index === i ? (
+                                                            <div>
+                                                                <textarea rows={3} className="w-full p-1 rounded border" value={inlineEdit.value} onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })} />
+                                                                <div className="mt-1 flex gap-2">
+                                                                    <button onClick={saveInlineEdit} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs">Save</button>
+                                                                    <button onClick={cancelInlineEdit} className="px-2 py-1 bg-white border rounded text-xs">Cancel</button>
+                                                                </div>
                                                             </div>
+                                                        ) : (
+                                                            <div className="pr-10" onClick={() => setInlineEdit({ section: 'experience', field: 'bullet', id: exp.id, index: i, value: bullet })}>
+                                                                {bullet}
+                                                            </div>
+                                                        )}
+                                                        <div className="absolute right-0 top-0">
+                                                            <button title="Improve this bullet with Gemini" onClick={() => handleFieldSuggest('experience', exp.id, bullet)} className="p-1 ml-2 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={14} /></button>
                                                         </div>
-                                                    ) : (
-                                                                    <div onClick={() => setInlineEdit({ section: 'experience', field: 'bullet', id: exp.id, index: i, value: bullet })} className="cursor-text">{bullet}</div>
-                                                                )}
-                                                                </div>
-                                                                <div className="flex-shrink-0">
-                                                                    <button title="Improve this bullet with Gemini" onClick={() => handleFieldSuggest('experience', exp.id, bullet)} className="p-1 ml-2 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={14} /></button>
-                                                                </div>
-                                                            </li>
-                                            ))}
-                                        </ul>
-                                        {/* Edit Hover Indicator - Hidden in Print */}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+
                                         <button 
                                             className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity p-1.5 bg-white shadow-sm border border-slate-200 rounded text-slate-400 hover:text-purple-600 print:hidden"
                                             onClick={() => {
@@ -1411,35 +1743,42 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     </div>
                                 ))}
                             </div>
-                        </section>
-                    )}
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No experience detected. Click the suggestion button to generate experience bullets or roles from your resume.</div>
+                        )}
+                    </section>
                     
                     {/* Education */}
-                    {displayData.education.length > 0 && (
-                         <section className="mb-6">
+                    <section className="mb-6">
+                        <div className="flex items-center justify-between">
                             <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Education</h2>
+                            <button title="Improve education with Gemini" onClick={() => handleFieldSuggest('education', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.education && displayData.education.length > 0 ? (
                             <div className="space-y-3">
                                 {displayData.education.map((edu) => (
                                     <div key={edu.id} className="flex justify-between items-baseline">
                                         <div>
-                                            <h3 className="font-bold text-slate-800 text-base">{edu.school}</h3>
+                                            <h3 className="text-slate-800 text-base">{edu.school}</h3>
                                             <div className="text-sm text-slate-600">{edu.degree}</div>
                                         </div>
                                         <span className="text-sm text-slate-600 font-medium">{edu.date}</span>
                                     </div>
                                 ))}
                             </div>
-                        </section>
-                    )}
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No education entries detected. Use the suggestion button to generate an education block from your resume.</div>
+                        )}
+                    </section>
 
                     {/* Skills */}
-                    {displayData.skills.length > 0 && (
-                        <section>
-                             <div className="flex items-center justify-between">
-                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
-                                <button title="Improve skills with Gemini" onClick={() => handleFieldSuggest('skills', null, (displayData.skills || []).map((s:any)=>s.name).join(', '))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
-                             </div>
-                             <div className="overflow-x-auto -mx-2 px-2">
+                    <section>
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
+                            <button title="Improve skills with Gemini" onClick={() => handleFieldSuggest('skills', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.skills && displayData.skills.length > 0 ? (
+                            <div className="overflow-x-auto -mx-2 px-2">
                                 <div className="flex flex-wrap gap-2 text-sm max-w-full">
                                     {displayData.skills.map((skill:any) => (
                                         <div key={skill.name} className="flex items-center gap-2 whitespace-normal">
@@ -1448,16 +1787,18 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                         </div>
                                     ))}
                                 </div>
-                             </div>
-                        </section>
-                    )}
-                    {/* Languages */}
-                    {displayData.languages && displayData.languages.length > 0 && (
-                        <section className="mt-4">
-                            <div className="flex items-center justify-between">
-                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Languages</h2>
-                                <button title="Improve languages with Gemini" onClick={() => handleFieldSuggest('languages', null, formattedDisplayLanguages)} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
                             </div>
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No skills detected. Use the suggestion button to extract or generate relevant skills from your resume.</div>
+                        )}
+                    </section>
+                    {/* Languages */}
+                    <section className="mt-4">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Languages</h2>
+                            <button title="Improve languages with Gemini" onClick={() => handleFieldSuggest('languages', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.languages && displayData.languages.length > 0 ? (
                             <div className="overflow-x-auto -mx-2 px-2">
                                 <div className="flex flex-wrap gap-2 text-sm max-w-full">
                                     {(displayData.languages || []).map((l:any) => (
@@ -1465,16 +1806,18 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     ))}
                                 </div>
                             </div>
-                        </section>
-                    )}
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No languages detected. Use the suggestion button to infer languages from your resume.</div>
+                        )}
+                    </section>
 
                     {/* Interests / Hobbies */}
-                    {displayData.interests && displayData.interests.length > 0 && (
-                        <section className="mt-4">
-                            <div className="flex items-center justify-between">
-                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Interests</h2>
-                                <button title="Improve interests with Gemini" onClick={() => handleFieldSuggest('interests', null, (displayData.interests || []).join(', '))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
-                            </div>
+                    <section className="mt-4">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Interests</h2>
+                            <button title="Improve interests with Gemini" onClick={() => handleFieldSuggest('interests', null, JSON.stringify(displayData))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                        </div>
+                        {displayData.interests && displayData.interests.length > 0 ? (
                             <div className="overflow-x-auto -mx-2 px-2">
                                 <div className="flex flex-wrap gap-2 text-sm max-w-full">
                                     {(displayData.interests || []).map((it:any) => (
@@ -1482,8 +1825,10 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     ))}
                                 </div>
                             </div>
-                        </section>
-                    )}
+                        ) : (
+                            <div className="text-sm text-slate-600 py-3">No interests detected. Use the suggestion button to generate interests or hobbies from your resume.</div>
+                        )}
+                    </section>
                 </div>
                 )}
             </div>
@@ -1538,11 +1883,19 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                         >
                             <PenTool size={16} /> Data Editor
                         </button>
+                        <button 
+                            onClick={() => setAssistantTab('appearance')}
+                            className={`flex-none min-w-[140px] py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'appearance' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
+                        >
+                            <GripVertical size={16} /> Appearance
+                        </button>
                     </div>
 
                     {/* Tab Content */}
                     <div className="flex-1 overflow-y-auto p-6 scroll-smooth bg-slate-50/30 dark:bg-black/20">
-                        {assistantTab === 'analysis' ? (
+                        {assistantTab === 'appearance' ? (
+                            <AppearancePanel appearance={appearance} onChange={(patch) => setAppearance(prev => ({ ...prev, ...(patch as any) }))} />
+                        ) : assistantTab === 'analysis' ? (
                             <div className="space-y-8">
                                 <div className="flex justify-end">
                                     <button onClick={handleAnalyze} disabled={analyzeCooldown} className={`text-sm px-3 py-1 ${analyzeCooldown ? 'bg-purple-300 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'} text-white rounded-md`}>{analyzeCooldown ? 'Analyze (cooling)' : 'Run Analysis'}</button>
