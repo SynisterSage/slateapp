@@ -22,6 +22,8 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         lastUpdated: '',
         personalInfo: { fullName: '', email: '', phone: '', location: '', website: '', summary: '' },
         skills: [],
+        languages: [],
+        interests: [],
         experience: [],
         education: [],
         revisions: [],
@@ -131,7 +133,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                   return lines.length ? lines[0] : null;
               };
 
-              const derivedName = parsed.name || parsed.fullName || firstLine(parsed.text) || null;
+              const derivedName = parsed.name || ((parsed.firstName && parsed.lastName) ? `${parsed.firstName} ${parsed.lastName}` : null) || parsed.fullName || firstLine(parsed.text) || null;
               const derivedSummary = parsed.summary || (parsed.text ? String(parsed.text).slice(0, 1000) : null);
               const derivedEmail = parsed.email || null;
               const derivedPhone = parsed.phone || null;
@@ -150,6 +152,13 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                   } else if (parsed.skillsText) {
                       newData.skills = String(parsed.skillsText).split(',').map((s:string) => ({ name: s.trim(), level: 'Intermediate' }));
                   }
+                  // languages & interests (optional parsed arrays)
+                  if (parsed.languages && Array.isArray(parsed.languages)) {
+                      newData.languages = parsed.languages.slice(0, 20);
+                  }
+                  if (parsed.interests && Array.isArray(parsed.interests)) {
+                      newData.interests = parsed.interests.slice(0, 40);
+                  }
                   return newData;
               });
           } catch (err) {
@@ -162,8 +171,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     // Right panel dynamic width (px)
     const [rightPanelWidth, setRightPanelWidth] = useState<number>(384);
     const resizingRef = React.useRef<{ active: boolean; startX: number; startWidth: number }>({ active: false, startX: 0, startWidth: 384 });
-  const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor'>('analysis');
-  const [showTuneModal, setShowTuneModal] = useState(false);
+    const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor' | 'tune'>('analysis');
   const [fixingIssueId, setFixingIssueId] = useState<string | null>(null);
     // Suggestion modal state
     const [suggestionModalOpen, setSuggestionModalOpen] = useState(false);
@@ -309,6 +317,42 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
           ...prev,
           skills: skillsList.map(s => ({ name: s, level: 'Expert' }))
       }));
+  };
+
+  // Handle Languages Editing
+  const handleLanguagesChange = (langsText: string) => {
+      const parts = langsText.split(/[,\n]/).map(s => s.trim()).filter(s => s !== '');
+      const profRe = /(native|fluent|advanced|intermediate|conversational|basic|proficient)/i;
+      const langs = parts.map(p => {
+          // parse formats like "Spanish (Fluent)", "English: Native", "ASL - Native"
+          const m = String(p).match(/([^:\-–—(]+)[:\-–—\(]?\s*([^)]*)/);
+          let name = p;
+          let prof = undefined;
+          if (m) {
+              name = String(m[1]).trim();
+              const maybe = String(m[2] || '').trim();
+              if (maybe) {
+                  const pm = maybe.match(profRe);
+                  if (pm) {
+                      const tok = pm[0].toLowerCase();
+                      if (tok.includes('native')) prof = 'Native';
+                      else if (tok.includes('fluent') || tok.includes('advanced') || tok.includes('proficient')) prof = 'Fluent';
+                      else if (tok.includes('intermediate')) prof = 'Intermediate';
+                      else if (tok.includes('conversational')) prof = 'Conversational';
+                      else if (tok.includes('basic')) prof = 'Basic';
+                  }
+              }
+          }
+          if (/^asl$/i.test(name)) name = 'American Sign Language';
+          return { name: String(name).trim(), proficiency: prof };
+      });
+      setResumeData(prev => ({ ...prev, languages: langs }));
+  };
+
+  // Handle Interests Editing
+  const handleInterestsChange = (intsText: string) => {
+      const ints = intsText.split(/[,\n]/).map(s => s.trim()).filter(s => s !== '');
+      setResumeData(prev => ({ ...prev, interests: ints }));
   };
 
     const handleGeneratePdf = async () => {
@@ -551,6 +595,37 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                     const skills = candidate.split(/[,\n]/).map((s:string) => s.trim()).filter(Boolean);
                     oldValue = (resumeData.skills || []).map((s:any) => s.name).join(', ');
                     setResumeData(prev => ({ ...prev, skills: skills.map((s:string)=>({ name: s, level: 'Intermediate' })) } as Resume));
+                } else if (issue.fixAction && issue.fixAction.targetSection === 'languages') {
+                    const parts = candidate.split(/[,\n]/).map((s:string) => s.trim()).filter(Boolean);
+                    const profRe = /(native|fluent|advanced|intermediate|conversational|basic|proficient)/i;
+                    const langs = parts.map(p => {
+                        const m = String(p).match(/([^:\-–—(]+)[:\-–—\(]?\s*([^)]*)/);
+                        let name = p;
+                        let prof = undefined;
+                        if (m) {
+                            name = String(m[1]).trim();
+                            const maybe = String(m[2] || '').trim();
+                            if (maybe) {
+                                const pm = maybe.match(profRe);
+                                if (pm) {
+                                    const tok = pm[0].toLowerCase();
+                                    if (tok.includes('native')) prof = 'Native';
+                                    else if (tok.includes('fluent') || tok.includes('advanced') || tok.includes('proficient')) prof = 'Fluent';
+                                    else if (tok.includes('intermediate')) prof = 'Intermediate';
+                                    else if (tok.includes('conversational')) prof = 'Conversational';
+                                    else if (tok.includes('basic')) prof = 'Basic';
+                                }
+                            }
+                        }
+                        if (/^asl$/i.test(name)) name = 'American Sign Language';
+                        return { name: String(name).trim(), proficiency: prof };
+                    });
+                    oldValue = (resumeData.languages || []).map((l:any) => l && l.name ? (l.name + (l.proficiency ? ' (' + l.proficiency + ')' : '')) : String(l)).join(', ');
+                    setResumeData(prev => ({ ...prev, languages: langs } as Resume));
+                } else if (issue.fixAction && issue.fixAction.targetSection === 'interests') {
+                    const ints = candidate.split(/[,\n]/).map((s:string) => s.trim()).filter(Boolean);
+                    oldValue = (resumeData.interests || []).join(', ');
+                    setResumeData(prev => ({ ...prev, interests: ints } as Resume));
                 }
 
                 // Persist updated resume (overwrite parsed data per spec)
@@ -828,13 +903,45 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
       const newData = { ...resumeData } as Resume & any;
       newData.personalInfo = {
           ...newData.personalInfo,
-          fullName: parsed.name || newData.personalInfo.fullName,
+          fullName: parsed.name || ((parsed.firstName && parsed.lastName) ? `${parsed.firstName} ${parsed.lastName}` : null) || newData.personalInfo.fullName,
           email: parsed.email || newData.personalInfo.email,
           phone: parsed.phone || newData.personalInfo.phone,
           summary: parsed.summary ? (parsed.summary.slice(0, 1000)) : newData.personalInfo.summary,
       };
       if (parsed.skillsText) {
           newData.skills = parsed.skillsText.split(',').map(s => ({ name: s.trim(), level: 'Intermediate' }));
+      }
+      if (parsed.languages) {
+          const src = Array.isArray(parsed.languages) ? parsed.languages : String(parsed.languages).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
+          newData.languages = src.map((it:any) => {
+              if (!it) return null;
+              if (typeof it === 'string') {
+                  const m = String(it).match(/([^:\-–—(]+)[:\-–—\(]?\s*([^)]*)/);
+                  let name = it;
+                  let prof = undefined;
+                  if (m) {
+                      name = String(m[1]).trim();
+                      const maybe = String(m[2] || '').trim();
+                      if (maybe) {
+                          const pm = maybe.match(/(native|fluent|advanced|intermediate|conversational|basic|proficient)/i);
+                          if (pm) {
+                              const tok = pm[0].toLowerCase();
+                              if (tok.includes('native')) prof = 'Native';
+                              else if (tok.includes('fluent') || tok.includes('advanced') || tok.includes('proficient')) prof = 'Fluent';
+                              else if (tok.includes('intermediate')) prof = 'Intermediate';
+                              else if (tok.includes('conversational')) prof = 'Conversational';
+                              else if (tok.includes('basic')) prof = 'Basic';
+                          }
+                      }
+                  }
+                  if (/^asl$/i.test(name)) name = 'American Sign Language';
+                  return { name: String(name).trim(), proficiency: prof };
+              }
+              return { name: it.name || it, proficiency: it.proficiency };
+          }).filter(Boolean);
+      }
+      if (parsed.interests) {
+          newData.interests = Array.isArray(parsed.interests) ? parsed.interests : String(parsed.interests).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
       }
 
           // Persist parsed data onto the resume row (no revision created automatically)
@@ -864,8 +971,8 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
   }
 
     const handleApplyTune = async () => {
-        setShowTuneModal(false);
         setTuneStep('input');
+        setAssistantTab('analysis');
         const tunedRevision = {
             id: `rev_tuned_${Date.now()}`,
             name: `Tuned: ${tuneJobRole || 'Job'}`,
@@ -898,13 +1005,49 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         // if parsed-only revision, merge parsed fields onto a copy of the current resume
         const copy: any = { ...resumeData };
         if (rev.parsed) {
-            copy.personalInfo = { ...copy.personalInfo, fullName: rev.parsed.name || copy.personalInfo.fullName, email: rev.parsed.email || copy.personalInfo.email, phone: rev.parsed.phone || copy.personalInfo.phone, summary: rev.parsed.summary || copy.personalInfo.summary };
+            const parsedFull = rev.parsed.name || ((rev.parsed.firstName && rev.parsed.lastName) ? `${rev.parsed.firstName} ${rev.parsed.lastName}` : null);
+            copy.personalInfo = { ...copy.personalInfo, fullName: parsedFull || copy.personalInfo.fullName, email: rev.parsed.email || copy.personalInfo.email, phone: rev.parsed.phone || copy.personalInfo.phone, summary: rev.parsed.summary || copy.personalInfo.summary };
             if (rev.parsed.skills) {
                 copy.skills = Array.isArray(rev.parsed.skills) ? rev.parsed.skills : String(rev.parsed.skills).split(',').map((s:string)=>({ name: s.trim(), level: 'Intermediate' }));
+            }
+            if (rev.parsed.languages) {
+                // normalize parsed languages to objects { name, proficiency }
+                const src = Array.isArray(rev.parsed.languages) ? rev.parsed.languages : String(rev.parsed.languages).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
+                copy.languages = src.map((it:any) => {
+                    if (!it) return null;
+                    if (typeof it === 'string') {
+                        // parse possible proficiency from string like "Spanish (Fluent)" or "English: Native"
+                        const m = String(it).match(/([^:()\-–—]+)[:\-–—\(]?\s*([^)]*)/);
+                        let name = it;
+                        let prof = undefined;
+                        if (m) {
+                            name = String(m[1]).trim();
+                            const p = String(m[2] || '').trim();
+                            if (p) {
+                                const lp = p.toLowerCase();
+                                if (/native/.test(lp)) prof = 'Native';
+                                else if (/fluent|advanced|proficient/.test(lp)) prof = 'Fluent';
+                                else if (/intermediate/.test(lp)) prof = 'Intermediate';
+                                else if (/conversational/.test(lp)) prof = 'Conversational';
+                                else if (/basic/.test(lp)) prof = 'Basic';
+                            }
+                        }
+                        return { name: String(name).trim(), proficiency: prof };
+                    }
+                    // object already
+                    return { name: it.name || it, proficiency: it.proficiency };
+                }).filter(Boolean);
+            }
+            if (rev.parsed.interests) {
+                copy.interests = Array.isArray(rev.parsed.interests) ? rev.parsed.interests : String(rev.parsed.interests).split(/[,\n]/).map((s:string)=>s.trim()).filter(Boolean);
             }
         }
         return copy;
     }, [previewRevision, resumeData]);
+
+    // Pre-format strings for suggestion helpers to avoid long inline JSX expressions
+    const formattedDisplayLanguages = (displayData.languages || []).map((l:any) => l && l.name ? (l.name + (l.proficiency ? ' (' + l.proficiency + ')' : '')) : String(l)).join(', ');
+    const formattedDisplayInterests = (displayData.interests || []).join(', ');
 
     const coreSnapshot = (obj: any) => ({
         personalInfo: obj?.personalInfo || {},
@@ -925,7 +1068,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     }, [previewRevision, displayData, resumeData]);
 
     return (
-    <div className="flex flex-col h-full bg-slate-100 dark:bg-gray-950 animate-fade-in relative overflow-hidden">
+    <div className="flex flex-col min-h-screen bg-slate-100 dark:bg-gray-950 animate-fade-in relative overflow-auto">
         {/* Top Navigation Bar */}
         <header className="py-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-slate-200 dark:border-gray-800 flex items-center justify-between px-4 shrink-0 z-20 sticky top-0">
             <div className="flex items-center gap-3">
@@ -1012,17 +1155,17 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         {suggestionModalOpen && suggestionModalIssue && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                 <div className="bg-white dark:bg-gray-900 p-4 rounded shadow w-[680px] max-w-full">
-                    <div className="flex items-start justify-between gap-4">
-                        <div>
-                            <h3 className="text-lg font-bold mb-1">Improve: {suggestionModalIssue.title}</h3>
-                            <p className="text-xs text-slate-500 dark:text-gray-400">{suggestionModalIssue.description}</p>
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <h3 className="text-lg font-bold mb-1">Improve: {suggestionModalIssue.title}</h3>
+                                <p className="text-xs text-slate-500 dark:text-gray-400">{suggestionModalIssue.description}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button onClick={() => { setSuggestionModalOpen(false); setSuggestionModalIssue(null); }} className="text-xs px-2 py-1 bg-white border rounded">Close</button>
+                            </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <button onClick={() => { setSuggestionModalOpen(false); setSuggestionModalIssue(null); }} className="text-xs px-2 py-1 bg-white border rounded">Close</button>
-                        </div>
-                    </div>
 
-                    <div className="mt-4">
+                        <div className="mt-4">
                         <p className="text-xs text-slate-500 mb-2">Choose a candidate rewrite below and click <strong>Apply</strong> to overwrite the parsed data.</p>
                         <div className="space-y-3 max-h-64 overflow-y-auto">
                             {suggestionModalCandidates && suggestionModalCandidates.length > 0 ? (
@@ -1044,7 +1187,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
         )}
 
         {/* Main Studio Area */}
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 overflow-auto">
             
             {/* Left: Revisions & History (Collapsed/Mini sidebar) */}
             <div className="w-64 bg-white dark:bg-gray-900 border-r border-slate-200 dark:border-gray-800 flex flex-col overflow-y-auto shrink-0 hidden lg:flex">
@@ -1296,14 +1439,49 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                 <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Skills</h2>
                                 <button title="Improve skills with Gemini" onClick={() => handleFieldSuggest('skills', null, (displayData.skills || []).map((s:any)=>s.name).join(', '))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
                              </div>
-                             <div className="flex flex-wrap gap-2 text-sm">
-                                {displayData.skills.map(skill => (
-                                    <div key={skill.name} className="flex items-center gap-2">
-                                        <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium">{skill.name}</span>
-                                        <button title={`Improve ${skill.name}`} onClick={() => handleFieldSuggest('skills', null, skill.name)} className="p-1 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={12} /></button>
-                                    </div>
-                                ))}
+                             <div className="overflow-x-auto -mx-2 px-2">
+                                <div className="flex flex-wrap gap-2 text-sm max-w-full">
+                                    {displayData.skills.map((skill:any) => (
+                                        <div key={skill.name} className="flex items-center gap-2 whitespace-normal">
+                                            <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium break-words">{skill.name}</span>
+                                            <button title={`Improve ${skill.name}`} onClick={() => handleFieldSuggest('skills', null, skill.name)} className="p-1 bg-white border rounded text-slate-500 hover:bg-slate-50"><Wand2 size={12} /></button>
+                                        </div>
+                                    ))}
+                                </div>
                              </div>
+                        </section>
+                    )}
+                    {/* Languages */}
+                    {displayData.languages && displayData.languages.length > 0 && (
+                        <section className="mt-4">
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Languages</h2>
+                                <button title="Improve languages with Gemini" onClick={() => handleFieldSuggest('languages', null, formattedDisplayLanguages)} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                            </div>
+                            <div className="overflow-x-auto -mx-2 px-2">
+                                <div className="flex flex-wrap gap-2 text-sm max-w-full">
+                                    {(displayData.languages || []).map((l:any) => (
+                                        <div key={String(l && l.name ? l.name : l)} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium break-words">{l && l.name ? (l.name + (l.proficiency ? ' - ' + l.proficiency : '')) : String(l)}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        </section>
+                    )}
+
+                    {/* Interests / Hobbies */}
+                    {displayData.interests && displayData.interests.length > 0 && (
+                        <section className="mt-4">
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-sm font-bold uppercase border-b border-slate-300 pb-1 mb-3 tracking-wider text-slate-800">Interests</h2>
+                                <button title="Improve interests with Gemini" onClick={() => handleFieldSuggest('interests', null, (displayData.interests || []).join(', '))} className="text-xs px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 ml-2"><Wand2 size={14} /></button>
+                            </div>
+                            <div className="overflow-x-auto -mx-2 px-2">
+                                <div className="flex flex-wrap gap-2 text-sm max-w-full">
+                                    {(displayData.interests || []).map((it:any) => (
+                                        <div key={String(it)} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs font-medium break-words">{it}</div>
+                                    ))}
+                                </div>
+                            </div>
                         </section>
                     )}
                 </div>
@@ -1339,21 +1517,24 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
 
                                 <div style={{ width: rightPanelWidth }} className="bg-white dark:bg-gray-900 border-l border-slate-200 dark:border-gray-800 flex flex-col shrink-0 animate-in slide-in-from-right duration-300 shadow-xl z-10 backdrop-blur-xl">
                     {/* Tabs */}
-                    <div className="flex border-b border-slate-200 dark:border-gray-800">
-                        <div className="flex-1 flex items-center justify-center gap-2">
-                            <button 
-                                onClick={() => setAssistantTab('analysis')}
-                                className={`py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'analysis' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
-                            >
-                                <Sparkles size={16} /> AI Analysis
-                            </button>
-                            <button onClick={() => setShowTuneModal(true)} title="Tune resume" className="p-2 rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-gray-800">
-                                <PenTool size={14} />
-                            </button>
-                        </div>
+                                <div className="flex border-b border-slate-200 dark:border-gray-800 overflow-x-auto">
+                        <button 
+                            onClick={() => setAssistantTab('analysis')}
+                            className={`flex-none min-w-[140px] py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'analysis' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
+                        >
+                            <Sparkles size={16} /> AI Analysis
+                        </button>
+
+                        <button 
+                            onClick={() => setAssistantTab('tune')}
+                            className={`flex-none min-w-[140px] py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'tune' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
+                        >
+                            <Target size={16} /> Tune for Job
+                        </button>
+
                         <button 
                             onClick={() => setAssistantTab('editor')}
-                            className={`flex-1 py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'editor' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
+                            className={`flex-none min-w-[140px] py-4 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${assistantTab === 'editor' ? 'border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10' : 'border-transparent text-slate-500 dark:text-gray-500 hover:text-slate-800 dark:hover:text-gray-300 hover:bg-slate-50 dark:hover:bg-gray-800'}`}
                         >
                             <PenTool size={16} /> Data Editor
                         </button>
@@ -1652,6 +1833,32 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     </div>
                                 </div>
 
+                                <div className="space-y-4 mt-4">
+                                    <h3 className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase tracking-wider border-b border-slate-200 dark:border-gray-700 pb-2">Languages</h3>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 dark:text-gray-400 mb-1">Comma or Newline Separated</label>
+                                        <textarea
+                                            value={(resumeData.languages || []).map((l:any) => l && l.name ? (l.name + (l.proficiency ? ' (' + l.proficiency + ')' : '')) : String(l)).join(', ')}
+                                            onChange={(e) => handleLanguagesChange(e.target.value)}
+                                            className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-900 dark:text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 text-sm outline-none transition-all min-h-[60px]"
+                                            placeholder="English, Spanish, American Sign Language (ASL)..."
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4 mt-4">
+                                    <h3 className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase tracking-wider border-b border-slate-200 dark:border-gray-700 pb-2">Interests</h3>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 dark:text-gray-400 mb-1">Comma or Newline Separated</label>
+                                        <textarea
+                                            value={(resumeData.interests || []).join(', ')}
+                                            onChange={(e) => handleInterestsChange(e.target.value)}
+                                            className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-900 dark:text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 text-sm outline-none transition-all min-h-[60px]"
+                                            placeholder="Music creation, Analog synths, Mechanical repair..."
+                                        />
+                                    </div>
+                                </div>
+
                                 <div className="space-y-4">
                                     <div className="flex justify-between items-center border-b border-slate-200 dark:border-gray-700 pb-2">
                                         <h3 className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase tracking-wider">Experience</h3>
@@ -1762,124 +1969,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
             )}
         </div>
 
-        {/* Tune Modal - Robust Multi-step */}
-        {showTuneModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in scale-95 duration-200 border border-slate-200 dark:border-gray-700">
-                    {/* Modal Header */}
-                    <div className="p-6 border-b border-slate-100 dark:border-gray-700 flex justify-between items-center bg-slate-50/80 dark:bg-gray-800/80 backdrop-blur-sm">
-                        <div>
-                            <h3 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                                <Target className="text-purple-600 dark:text-purple-400" size={22} /> Tune for Job
-                            </h3>
-                            <p className="text-sm text-slate-500 dark:text-gray-400 mt-1">Tailor your resume content to match a specific job description.</p>
-                        </div>
-                        <button onClick={() => setShowTuneModal(false)} className="p-2 hover:bg-slate-200 dark:hover:bg-gray-700 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-gray-200 transition-colors">×</button>
-                    </div>
-
-                    {/* Modal Content */}
-                    <div className="p-6 flex-1 overflow-y-auto min-h-[300px]">
-                        {tuneStep === 'input' && (
-                            <div className="space-y-6 animate-in slide-in-from-right duration-300">
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 dark:text-gray-300 mb-2">Target Job Title</label>
-                                    <input 
-                                        type="text" 
-                                        value={tuneJobRole}
-                                        onChange={(e) => setTuneJobRole(e.target.value)}
-                                        className="w-full p-3 rounded-xl border border-slate-200 dark:border-gray-700 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none shadow-sm bg-white dark:bg-gray-900 text-slate-900 dark:text-white"
-                                        placeholder="e.g. Senior Full Stack Engineer"
-                                        autoFocus
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 dark:text-gray-300 mb-2">Job Description (JD)</label>
-                                    <textarea 
-                                        value={tuneJobDesc}
-                                        onChange={(e) => setTuneJobDesc(e.target.value)}
-                                        className="w-full h-48 rounded-xl border border-slate-200 dark:border-gray-700 p-4 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none shadow-sm font-mono bg-white dark:bg-gray-900 text-slate-900 dark:text-white"
-                                        placeholder="Paste the full job description here..."
-                                    ></textarea>
-                                </div>
-                            </div>
-                        )}
-
-                        {tuneStep === 'analyzing' && (
-                            <div className="flex flex-col items-center justify-center h-64 animate-in fade-in duration-500 text-center">
-                                <div className="relative mb-6">
-                                    <div className="w-16 h-16 bg-purple-100 dark:bg-purple-900/30 rounded-full flex items-center justify-center animate-pulse">
-                                        <RefreshCw className="text-purple-600 dark:text-purple-400 animate-spin" size={32} />
-                                    </div>
-                                </div>
-                                <h4 className="text-xl font-bold text-slate-800 dark:text-white">Analyzing Fit...</h4>
-                                <p className="text-slate-500 dark:text-gray-400 mt-2 max-w-xs mx-auto">Our AI is comparing your current skills and experience against the job requirements.</p>
-                            </div>
-                        )}
-
-                        {tuneStep === 'preview' && (
-                            <div className="animate-in slide-in-from-right duration-300 space-y-6">
-                                <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-900/30 rounded-xl p-5 flex gap-4 items-start">
-                                    <div className="w-8 h-8 bg-emerald-100 dark:bg-emerald-900/50 rounded-full flex items-center justify-center shrink-0 text-emerald-600 dark:text-emerald-400">
-                                        <Check size={18} strokeWidth={3} />
-                                    </div>
-                                    <div>
-                                        <h4 className="font-bold text-emerald-900 dark:text-emerald-300 text-lg">Optimization Complete</h4>
-                                        <p className="text-sm text-emerald-700 dark:text-emerald-400 mt-1">We identified 5 key terms to emphasize and rewrote 2 experience bullets to better match the JD.</p>
-                                    </div>
-                                </div>
-                                
-                                <div>
-                                    <h5 className="font-bold text-slate-700 dark:text-gray-300 text-xs uppercase tracking-wider mb-3 flex items-center gap-2">
-                                        <Sparkles size={12} /> Proposed Changes
-                                    </h5>
-                                    <div className="space-y-3">
-                                        <div className="p-4 border border-slate-200 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm">
-                                            <div className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase mb-2">Keywords to Add</div>
-                                            <div className="flex flex-wrap gap-2">
-                                                {['GraphQL', 'AWS Lambda', 'System Design', 'CI/CD'].map(k => (
-                                                    <span key={k} className="px-2.5 py-1 bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-md text-xs font-bold border border-purple-100 dark:border-purple-900/50">+ {k}</span>
-                                                ))}
-                                            </div>
-                                        </div>
-                                        <div className="p-4 border border-slate-200 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm">
-                                            <div className="text-xs font-bold text-slate-400 dark:text-gray-500 uppercase mb-2">Experience Bullet Rewrite</div>
-                                            <div className="flex flex-col gap-2 text-sm">
-                                                <div className="flex gap-2 items-start opacity-60">
-                                                    <span className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[10px] font-bold px-1 rounded mt-0.5">OLD</span>
-                                                    <span className="line-through decoration-slate-400 text-slate-500 dark:text-gray-500">Managed servers for the team</span>
-                                                </div>
-                                                <div className="flex gap-2 items-start">
-                                                    <span className="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold px-1 rounded mt-0.5">NEW</span>
-                                                    <span className="text-slate-800 dark:text-gray-200 font-medium">Orchestrated scalable AWS infrastructure using Lambda and EC2</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Modal Actions */}
-                    <div className="p-5 bg-slate-50 dark:bg-gray-800 border-t border-slate-100 dark:border-gray-700 flex justify-end gap-3">
-                        {tuneStep !== 'analyzing' && (
-                             <button onClick={() => setShowTuneModal(false)} className="px-5 py-2.5 text-slate-600 dark:text-gray-300 font-medium hover:bg-slate-200 dark:hover:bg-gray-700 rounded-xl transition-colors">Cancel</button>
-                        )}
-                        
-                        {tuneStep === 'input' && (
-                            <button onClick={handleStartTune} disabled={!tuneJobDesc} className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl shadow-md shadow-purple-200 dark:shadow-none flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95">
-                                <Target size={18} /> Analyze Fit
-                            </button>
-                        )}
-                         {tuneStep === 'preview' && (
-                            <button onClick={handleApplyTune} className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md shadow-emerald-200 dark:shadow-none flex items-center gap-2 transition-all active:scale-95">
-                                <Sparkles size={18} /> Generate Tuned Resume
-                            </button>
-                        )}
-                    </div>
-                </div>
-            </div>
-        )}
+        
         
 
         {/* Parsed preview is applied automatically on load; no manual preview panel shown. */}

@@ -42,8 +42,11 @@ const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url || '', true);
 
   // Read and parse JSON body for non-GET requests so handlers can access req.body
+  // NOTE: don't pre-read binary uploads (e.g., PDF file uploads) — only read when content-type is JSON/text
   let bodyText = '';
-  if (req.method && req.method.toUpperCase() !== 'GET') {
+  const contentType = (req.headers && req.headers['content-type']) ? String(req.headers['content-type']) : '';
+  const shouldReadBody = req.method && req.method.toUpperCase() !== 'GET' && (contentType.includes('application/json') || contentType.includes('application/x-www-form-urlencoded') || contentType.startsWith('text/'));
+  if (shouldReadBody) {
     try {
       bodyText = await new Promise((resolve, reject) => {
         let acc = '';

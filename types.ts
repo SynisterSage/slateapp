@@ -33,6 +33,11 @@ export interface Skill {
   level: 'Beginner' | 'Intermediate' | 'Expert';
 }
 
+export interface Language {
+  name: string;
+  proficiency?: 'Basic' | 'Conversational' | 'Intermediate' | 'Fluent' | 'Native';
+}
+
 export interface WorkExperience {
   id: string;
   role: string;
@@ -102,6 +107,8 @@ export interface Resume {
   // Structured Data for Editor
   personalInfo: PersonalInfo;
   skills: Skill[];
+  languages?: Language[];
+  interests?: string[];
   experience: WorkExperience[];
   education: Education[];
 
