@@ -66,6 +66,11 @@ const server = http.createServer(async (req, res) => {
     }
     const fakeRes = makeResNode(res);
     try {
+      if (parsed.pathname === '/api/tune') {
+        const tuneHandler = (await import('../api/tune.js')).default;
+        console.log('dev-server: routing /api/tune to tune handler');
+        await tuneHandler(fakeReq, fakeRes);
+      } else
       // Route /api/parse-resume and /api/upload-resume to their handlers; otherwise to jobsHandler
       if (parsed.pathname === '/api/parse-resume') {
         const parseHandler = (await import('../api/parseResume.js')).default;

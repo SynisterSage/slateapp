@@ -6,6 +6,9 @@ import {
 } from 'lucide-react';
 import { Resume, AnalysisIssue } from '../types';
 import AppearancePanel from '../components/AppearancePanel';
+import { ChevronDown } from 'lucide-react';
+import AnalysisCard from '../components/AnalysisCard';
+import TuneForJob from '../components/TuneForJob';
 import { getResumeById, updateResume, createResumeRevision, generatePdf } from '../src/api';
 import supabase from '../src/lib/supabaseClient';
 
@@ -249,6 +252,19 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     const resizingRef = React.useRef<{ active: boolean; startX: number; startWidth: number }>({ active: false, startX: 0, startWidth: 384 });
     const [assistantTab, setAssistantTab] = useState<'analysis' | 'editor' | 'tune' | 'appearance'>('analysis');
   const [fixingIssueId, setFixingIssueId] = useState<string | null>(null);
+    const [openIssueId, setOpenIssueId] = useState<string | null>(null);
+    const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => ({
+        structure: false,
+        skills: false,
+        contact: false,
+        reverseChron: false,
+        bullets: false,
+        formatting: false,
+    }));
+
+    const toggleSection = (key: string) => {
+        setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
+    };
     // Suggestion modal state
     const [suggestionModalOpen, setSuggestionModalOpen] = useState(false);
     const [suggestionModalIssue, setSuggestionModalIssue] = useState<any | null>(null);
@@ -1979,36 +1995,55 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                     ].map(section => {
                                         const scoreVal = Number(resumeData.analysis?.categories?.[section.key] || 0);
                                         const related = (resumeData.analysis?.issues || []).filter((i:any) => i.category === section.key || (i.source === 'heuristic' && i.category == null && String(i.id || '').includes(section.key)));
+                                        const isOpen = Boolean(openSections[section.key]);
                                         return (
-                                            <div key={section.key} className="w-full bg-white dark:bg-gray-800 p-4 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
-                                                <div className="flex items-center justify-between mb-2">
+                                            <div key={section.key} className="w-full bg-white dark:bg-gray-800 rounded-xl border border-slate-100 dark:border-gray-700 shadow-sm">
+                                                <div className="p-3 flex items-center justify-between cursor-pointer" onClick={() => toggleSection(section.key)}>
                                                     <div>
                                                         <div className="text-xs font-bold text-slate-600 dark:text-gray-300">{section.title}</div>
                                                         <div className="text-[10px] text-slate-400">{scoreVal}%</div>
                                                     </div>
-                                                    <div className={`px-2 py-1 rounded-md text-xs font-bold ${scoreVal >= 80 ? 'bg-emerald-100 text-emerald-700' : scoreVal >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{scoreVal}</div>
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`px-2 py-1 rounded-md text-xs font-bold ${scoreVal >= 80 ? 'bg-emerald-100 text-emerald-700' : scoreVal >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{scoreVal}</div>
+                                                        <ChevronDown className={`w-4 h-4 text-slate-400 transform transition-transform ${isOpen ? 'rotate-180' : 'rotate-0'}`} />
+                                                    </div>
                                                 </div>
-                                                <div className="text-xs text-slate-500 dark:text-gray-400 mb-3">{section.title} heuristics and suggestions.</div>
-                                                <div className="flex flex-col gap-3">
-                                                    {related.length === 0 ? (
-                                                        <div className="text-sm text-slate-500">No issues detected.</div>
-                                                    ) : related.map((issue:any) => (
-                                                        <div key={issue.id} className="p-3 bg-slate-50 dark:bg-gray-900 rounded border border-slate-100 dark:border-gray-700 flex flex-col gap-2">
-                                                            <div>
-                                                                <div className="text-sm font-semibold text-slate-800 dark:text-gray-100">{issue.title}</div>
-                                                                <div className="text-xs text-slate-500 dark:text-gray-400">{issue.description}</div>
-                                                                {issue.suggestion && <div className="mt-2 text-xs text-slate-600 dark:text-gray-300">Suggestion: {issue.suggestion}</div>}
-                                                            </div>
-                                                            <div className="flex items-center gap-2">
-                                                                {issue.fixAction ? (
-                                                                    <button onClick={() => handleApplyFix(issue)} className="text-xs px-2 py-1 bg-purple-600 text-white rounded">Apply Fix</button>
-                                                                ) : (
-                                                                    <button onClick={() => handleSuggestRewrite(issue)} className="text-xs px-2 py-1 bg-white border rounded">Suggest Rewrite</button>
-                                                                )}
-                                                            </div>
+
+                                                {isOpen && (
+                                                    <div className="p-4 text-xs text-slate-500 dark:text-gray-400 border-t border-slate-100 dark:border-gray-700">
+                                                        <div className="mb-3">{section.title} heuristics and suggestions.</div>
+                                                        <div className="flex flex-col gap-3">
+                                                            {related.length === 0 ? (
+                                                                <div className="text-sm text-slate-500">No issues detected.</div>
+                                                            ) : related.map((issue:any) => (
+                                                                                                                        <div key={issue.id} className="p-4 bg-slate-50 dark:bg-gray-900 rounded-lg border border-slate-100 dark:border-gray-700 flex flex-col gap-3 shadow-sm">
+                                                                                                                                        <div>
+                                                                                                                                                <div className="text-sm font-semibold text-slate-800 dark:text-gray-100">{issue.title}</div>
+                                                                                                                                                <div className="text-sm text-slate-600 dark:text-gray-400 mt-2 leading-relaxed">{issue.description}</div>
+                                                                                                                                                {issue.suggestion && (
+                                                                                                                                                            <div className="mt-3 bg-white dark:bg-gray-800 p-4 rounded-md border border-slate-100 dark:border-gray-700 text-sm text-slate-700 dark:text-gray-200">
+                                                                                                                                                                <div className="font-semibold text-sm text-purple-600 flex items-center gap-2"><Wand2 size={12} />Suggestion</div>
+                                                                                                                                                                <div className="mt-2 text-sm text-slate-600 dark:text-gray-300">{issue.suggestion}</div>
+                                                                                                                                                                {/* candidates are not shown inline; use the Apply Suggestion action below next to Suggest Rewrite */}
+                                                                                                                                                            </div>
+                                                                                                                                                        )}
+                                                                                                                                        </div>
+                                                                                                                                        <div className="flex items-center gap-2">
+                                                                                                                                            <button onClick={() => handleSuggestRewrite(issue)} className="text-sm px-3 py-2 bg-purple-600 text-white rounded-md shadow-sm flex items-center gap-2"><Wand2 size={14} /> Suggest Rewrite</button>
+                                                                                                                                            <button onClick={() => {
+                                                                                                                                                const primary = (issue.suggestionCandidates && issue.suggestionCandidates.length) ? issue.suggestionCandidates[0] : issue.suggestion;
+                                                                                                                                                if (primary) {
+                                                                                                                                                    if (issue.fixAction && issue.fixAction.targetSection === 'summary') {
+                                                                                                                                                        handleInputChange('personalInfo', 'summary', primary);
+                                                                                                                                                    }
+                                                                                                                                                }
+                                                                                                                                            }} className={`text-sm px-3 py-2 ${issue.suggestion || (issue.suggestionCandidates && issue.suggestionCandidates.length > 0) ? 'bg-emerald-600 text-white' : 'bg-emerald-200 text-white cursor-not-allowed'} rounded-md shadow-sm`}>Apply Suggestion</button>
+                                                                                                                                        </div>
+                                                                                                                                </div>
+                                                            ))}
                                                         </div>
-                                                    ))}
-                                                </div>
+                                                    </div>
+                                                )}
                                             </div>
                                         );
                                     })}
@@ -2043,55 +2078,48 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
                                         )}
 
                                         {resumeData.analysis?.issues.map(issue => (
-                                            <div key={issue.id} className="p-4 bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl shadow-sm hover:shadow-md hover:border-purple-300 dark:hover:border-purple-600 transition-all group">
-                                                <div className="flex gap-3 items-start">
-                                                    <div className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${issue.severity === 'critical' ? 'bg-rose-500' : 'bg-amber-500'}`}></div>
-                                                    <div className="flex-1">
-                                                        <h4 className="text-sm font-bold text-slate-800 dark:text-gray-200">{issue.title}</h4>
-                                                        <p className="text-xs text-slate-500 dark:text-gray-400 mt-1 leading-relaxed">{issue.description}</p>
-                                                        
-                                                        {issue.suggestion && (
-                                                            <div className="mt-3 bg-slate-50 dark:bg-gray-700/50 p-2.5 rounded-lg text-xs border border-slate-100 dark:border-gray-700 text-slate-600 dark:text-gray-300">
-                                                                <span className="font-semibold text-purple-600 dark:text-purple-400 block mb-1 flex items-center gap-1">
-                                                                    <Wand2 size={10} /> Suggestion:
-                                                                </span>
-                                                                {issue.suggestion}
-                                                                <div className="mt-2 flex gap-2">
-                                                                    <button onClick={() => handleSuggestRewrite(issue)} className="text-xs px-2 py-1 bg-white border rounded">Suggest Rewrite</button>
-                                                                    {issue.suggestionCandidates && issue.suggestionCandidates.length > 0 && (
-                                                                        <button onClick={() => {
-                                                                            // apply the first candidate immediately for convenience
-                                                                            const cand = issue.suggestionCandidates[0];
-                                                                            if (issue.fixAction && issue.fixAction.targetSection === 'summary') {
-                                                                                handleInputChange('personalInfo', 'summary', cand);
-                                                                            }
-                                                                        }} className="text-xs px-2 py-1 bg-emerald-600 text-white rounded">Apply Suggestion</button>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        )}
-
-                                                        {issue.fixAction && (
-                                                            <button 
-                                                                onClick={() => handleApplyFix(issue)}
-                                                                disabled={fixingIssueId === issue.id}
-                                                                className="mt-3 w-full py-2 text-xs font-medium bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors shadow-sm shadow-purple-200 dark:shadow-none flex items-center justify-center gap-2 disabled:opacity-70"
-                                                            >
-                                                                {fixingIssueId === issue.id ? (
-                                                                    <RefreshCw size={12} className="animate-spin" />
-                                                                ) : (
-                                                                    <Sparkles size={12} />
-                                                                )}
-                                                                {fixingIssueId === issue.id ? 'Applying AI Fix...' : 'Apply Fix'}
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
+                                            <AnalysisCard
+                                                key={issue.id}
+                                                issue={issue}
+                                                isOpen={openIssueId === issue.id}
+                                                onToggle={() => setOpenIssueId(openIssueId === issue.id ? null : issue.id)}
+                                                onSuggest={handleSuggestRewrite}
+                                                onApplyFix={handleApplyFix}
+                                                isApplying={fixingIssueId === issue.id}
+                                                onApplyCandidate={(iss, cand) => {
+                                                    if (cand) {
+                                                        if (iss.fixAction && iss.fixAction.targetSection === 'summary') {
+                                                            handleInputChange('personalInfo', 'summary', cand);
+                                                        }
+                                                    }
+                                                }}
+                                            />
                                         ))}
                                     </div>
                                 </div>
                             </div>
+                        ) : assistantTab === 'tune' ? (
+                            <TuneForJob resumeData={resumeData} onChange={(items) => {
+                                // Persist tunes into resume.data.tunes
+                                try {
+                                    const newData: any = { ...(resumeData as any) };
+                                    newData.tunes = items;
+                                    setResumeData(newData as any);
+                                    // debounce/small cooldown to avoid rapid spamming
+                                    (async () => {
+                                        try {
+                                            await updateResume(newData.id, { data: newData, lastUpdated: new Date().toISOString() });
+                                        } catch (err) {
+                                            console.warn('Failed to persist tunes', err);
+                                        }
+                                    })();
+                                } catch (e) { console.warn('persist tunes error', e); }
+                            }} onPreview={(tunedResume) => {
+                                try {
+                                    const tunedRev = { id: `preview-${Date.now()}`, name: 'Tune Preview', data: tunedResume, createdAt: new Date().toISOString() };
+                                    setPreviewRevision(tunedRev as any);
+                                } catch (e) { console.warn('preview error', e); }
+                            }} />
                         ) : (
                             <div className="space-y-8 animate-in fade-in pb-8">
                                 {/* Editor Form */}
