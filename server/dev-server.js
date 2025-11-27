@@ -28,8 +28,30 @@ function makeResNode(originalRes) {
     setHeader(k, v) {
       originalRes.setHeader(k, v);
     },
+    writeHead(status, headers) {
+      // mirror node's writeHead for handlers that perform redirects
+      try {
+        if (headers) originalRes.writeHead(status, headers);
+        else originalRes.statusCode = status;
+      } catch (e) {
+        // some environments may not support writeHead on the original response
+        originalRes.statusCode = status;
+        if (headers) {
+          Object.entries(headers).forEach(([k, v]) => originalRes.setHeader(k, v));
+        }
+      }
+    },
+    end(body) {
+      if (!originalRes.headersSent && this._status) originalRes.statusCode = this._status;
+      if (body !== undefined) originalRes.end(body);
+      else originalRes.end();
+    },
     json(obj) {
       if (!originalRes.headersSent) {
+        // Add permissive CORS headers for local dev to allow Authorization header in requests
+        originalRes.setHeader('Access-Control-Allow-Origin', '*');
+        originalRes.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+        originalRes.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
         originalRes.setHeader('Content-Type', 'application/json');
         originalRes.statusCode = this._status || 200;
       }
@@ -40,6 +62,16 @@ function makeResNode(originalRes) {
 
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url || '', true);
+
+  // Quick CORS preflight handling for /api/* requests from the frontend (Authorization header)
+  if (parsed.pathname && parsed.pathname.startsWith('/api/') && req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
   // Read and parse JSON body for non-GET requests so handlers can access req.body
   // NOTE: don't pre-read binary uploads (e.g., PDF file uploads) — only read when content-type is JSON/text
@@ -114,6 +146,27 @@ const server = http.createServer(async (req, res) => {
         // attach parsed.query onto the original request object
         try { req.query = parsed.query; } catch (e) {}
         await renderHandler(req, fakeRes);
+      } else if (parsed.pathname === '/api/auth-gmail-start') {
+        const handler = (await import('../api/auth-gmail-start.js')).default || (await import('../api/auth-gmail-start.js'));
+        await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/auth-gmail-callback') {
+        // Use .mjs callback handler to avoid mixed CJS/ESM issues in local dev
+        const handler = (await import('../api/auth-gmail-callback.mjs')).default || (await import('../api/auth-gmail-callback.mjs'));
+        await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/sync-gmail') {
+        // Log headers for debugging Authorization forwarding
+        try { console.log('dev-server: /api/sync-gmail headers ->', req.headers); } catch (e) {}
+        const handler = (await import('../api/sync-gmail.js')).default || (await import('../api/sync-gmail.js'));
+        await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/check-gmail') {
+        const handler = (await import('../api/check-gmail.js')).default || (await import('../api/check-gmail.js'));
+        await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/list-gmail-accounts') {
+        const handler = (await import('../api/list-gmail-accounts.js')).default || (await import('../api/list-gmail-accounts.js'));
+        await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/remove-gmail-account') {
+        const handler = (await import('../api/remove-gmail-account.js')).default || (await import('../api/remove-gmail-account.js'));
+        await handler(fakeReq, fakeRes);
       } else {
         await jobsHandler(fakeReq, fakeRes);
       }

@@ -102,6 +102,43 @@ const App = () => {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
+  // Map views to URL paths and vice-versa so the SPA keeps the URL in sync
+  const viewToPath = (view: AppView) => {
+    switch (view) {
+      case AppView.DASHBOARD: return '/';
+      case AppView.RESUMES: return '/resumes';
+      case AppView.RESUME_DETAIL: return '/resumes/detail';
+      case AppView.JOBS: return '/jobs';
+      case AppView.APPLICATIONS: return '/applications';
+      case AppView.SETTINGS: return '/settings';
+      default: return '/';
+    }
+  };
+
+  const pathToView = (path: string) => {
+    if (!path) return AppView.DASHBOARD;
+    if (path.startsWith('/resumes')) return AppView.RESUMES;
+    if (path.startsWith('/jobs')) return AppView.JOBS;
+    if (path.startsWith('/applications')) return AppView.APPLICATIONS;
+    if (path.startsWith('/settings')) return AppView.SETTINGS;
+    return AppView.DASHBOARD;
+  };
+
+  // Initialize currentView from location.pathname so deep links (like /settings)
+  // rendered after OAuth redirects will show the expected view.
+  useEffect(() => {
+    try {
+      const initial = pathToView(window.location.pathname || '/');
+      setCurrentView(initial);
+    } catch (e) {}
+    // Listen for back/forward navigation
+    const onPop = () => {
+      try { setCurrentView(pathToView(window.location.pathname || '/')); } catch (e) {}
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
   const handleLogin = () => {
       setIsAuthenticated(true);
   };
@@ -117,6 +154,7 @@ const App = () => {
         } catch (e) { console.warn('supabaseSession signOut error', e); }
         setIsAuthenticated(false);
         setCurrentView(AppView.DASHBOARD);
+        try { window.localStorage.removeItem('gmail_connected'); } catch (e) {}
       })();
   };
 
@@ -140,6 +178,13 @@ const App = () => {
       setJobSearchContextResumeId(null);
       setInitialApplyJobId(null);
     }
+    // Update view state and push a URL entry so the browser reflects the current view
+    try {
+      const newPath = viewToPath(view);
+      if (window.location.pathname !== newPath) {
+        window.history.pushState({}, '', newPath);
+      }
+    } catch (e) {}
     setCurrentView(view);
   };
 

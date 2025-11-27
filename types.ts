@@ -128,6 +128,14 @@ export interface Job {
   status?: 'New' | 'Applied' | 'Interviewing' | 'Offer';
   tags?: string[];
   sourceUrl?: string;
+  // Optional, parsed fields extracted from HTML descriptions
+  responsibilities?: string[];
+  requirements?: string[];
+  benefits?: string[];
+  cleanDescription?: string;
+  employmentType?: string; // e.g. Full-time, Contract
+  seniority?: string; // e.g. Senior, Junior
+  skills?: string[];
 }
 
 export interface Application {

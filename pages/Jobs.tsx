@@ -9,6 +9,7 @@ import {
 // Jobs and resumes now come from providers and Supabase
 import { searchJobs as apiSearchJobs, getResumes } from '../src/api';
 import { Job } from '../types';
+import computeMatchScore from '../src/lib/matchJob';
 
 interface JobsProps {
     preselectedResumeId?: string | null;
@@ -32,6 +33,18 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
     const [isScanning, setIsScanning] = useState(false);
     const [savedJobIds, setSavedJobIds] = useState<Set<string>>(new Set());
     const [resumes, setResumes] = useState<any[]>([]);
+
+    // Utility: safe excerpt from job description/cleanDescription
+    const excerpt = (job: Job, n = 180) => {
+        const raw = (job as any).cleanDescription || job.description || '';
+        const stripped = String(raw).replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        if (!stripped) return '';
+        if (stripped.length <= n) return stripped;
+        // cut at last space before limit
+        const cut = stripped.slice(0, n);
+        const lastSpace = cut.lastIndexOf(' ');
+        return (lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trim() + '...';
+    };
     
     // Filter State
     const [activeFilters, setActiveFilters] = useState<FilterState>({
@@ -78,7 +91,31 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
 
     useEffect(() => {
         // initial load
-        doSearch('');
+        // Load preferences (localStorage -> supabase) and apply default search if user hasn't typed anything
+        (async function loadAndSearch() {
+            try {
+                let prefs: any = null;
+                try {
+                    const raw = typeof window !== 'undefined' ? window.localStorage.getItem('jobPreferences') : null;
+                    if (raw) prefs = JSON.parse(raw);
+                } catch (e) { prefs = null; }
+                if (!prefs) {
+                    try {
+                        const u = await (await import('../src/lib/supabaseClient')).default.auth.getUser();
+                        const user = u && (u as any).data && (u as any).data.user ? (u as any).data.user : null;
+                        prefs = user?.user_metadata?.preferences || user?.user_metadata || null;
+                    } catch (e) { prefs = null; }
+                }
+                if (prefs && prefs.jobTitle && !searchTerm) {
+                    setSearchTerm(prefs.jobTitle);
+                    await doSearch(prefs.jobTitle);
+                } else {
+                    await doSearch('');
+                }
+            } catch (e) {
+                await doSearch('');
+            }
+        })();
                 // load resumes for selector
                 (async () => {
                     try {
@@ -113,10 +150,11 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
     const filteredJobs = jobs.filter(job => {
         // 1. Search Term
         const term = searchTerm.toLowerCase();
+        const hay = ((job as any).cleanDescription || job.description || '').toLowerCase();
         const matchesSearch = !term || 
-                              job.title.toLowerCase().includes(term) || 
-                              job.company.toLowerCase().includes(term) || 
-                              job.description.toLowerCase().includes(term);
+                      job.title.toLowerCase().includes(term) || 
+                      job.company.toLowerCase().includes(term) || 
+                      hay.includes(term);
 
         // 2. Location
         const isRemote = job.location.toLowerCase().includes('remote');
@@ -139,6 +177,33 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
 
         return matchesSearch && matchesLocation && matchesScore && matchesType;
     });
+
+        // --- Ranking / Matching ---
+        // Load preferences from localStorage if available
+        let prefs: any = null;
+        try {
+            if (typeof window !== 'undefined') {
+                const raw = window.localStorage.getItem('jobPreferences');
+                if (raw) prefs = JSON.parse(raw || '{}');
+            }
+        } catch (e) { prefs = null; }
+
+        const activeResume = activeResumeId && activeResumeId !== 'all' ? resumes.find(r => r.id === activeResumeId) : null;
+        // Compute a ranked list without mutating original jobs
+        const rankedJobs = filteredJobs.map(j => ({ ...j, matchScore: (function() {
+            try {
+                const compute = require('../src/lib/matchJob').computeMatchScore as any;
+                return compute(j, activeResume, prefs);
+            } catch (e) {
+                try {
+                    // fallback to import default
+                    const comp = (require('../src/lib/matchJob').default) as any;
+                    return comp(j, activeResume, prefs);
+                } catch (e2) {
+                    return j.matchScore || 0;
+                }
+            }
+        })() })).sort((a,b) => (b.matchScore || 0) - (a.matchScore || 0));
 
     // --- Actions ---
     
@@ -421,29 +486,59 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                 <Clock size={14} /> {selectedJob.postedAt}
                             </div>
                          </div>
-                         <div className="p-3 bg-slate-50 dark:bg-gray-800 rounded-lg border border-slate-100 dark:border-gray-700">
-                            <span className="text-xs text-slate-400 dark:text-gray-500 uppercase font-bold block mb-1">Type</span>
-                            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-gray-200">
-                                <Briefcase size={14} /> Full-time
+                            <div className="p-3 bg-slate-50 dark:bg-gray-800 rounded-lg border border-slate-100 dark:border-gray-700">
+                               <span className="text-xs text-slate-400 dark:text-gray-500 uppercase font-bold block mb-1">Type</span>
+                               <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-gray-200">
+                                   <Briefcase size={14} /> {selectedJob.employmentType || selectedJob.contract_time || '—'}
+                               </div>
                             </div>
-                         </div>
                     </div>
 
                     <div className="space-y-4">
                         <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide border-b border-slate-100 dark:border-gray-800 pb-2">Description</h3>
-                        <p className="text-slate-600 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-line">
-                            {selectedJob.description}
-                            {'\n\n'}
-                            Responsibilities:
-                            {'\n'}• Architect scalable frontend solutions
-                            {'\n'}• Mentor junior developers
-                            {'\n'}• Collaborate with product and design teams
-                            {'\n\n'}
-                            Requirements:
-                            {'\n'}• 5+ years of experience with React
-                            {'\n'}• Experience with TypeScript and Node.js
-                            {'\n'}• Strong communication skills
-                        </p>
+                        <div className="text-slate-600 dark:text-gray-300 text-sm leading-relaxed">
+                            <p className="whitespace-pre-line mb-3">{selectedJob.cleanDescription || selectedJob.description || (selectedJob.raw && (selectedJob.raw.description || selectedJob.raw.contents))}</p>
+
+                            {/* If provider truncated the snippet (common), offer a link to the original posting */}
+                            {selectedJob.sourceUrl && (
+                                <p className="text-sm mt-2">
+                                    <a href={selectedJob.sourceUrl} target="_blank" rel="noreferrer" className="text-purple-600 dark:text-purple-400 font-medium hover:underline">View original posting</a>
+                                </p>
+                            )}
+
+                            {selectedJob.responsibilities && selectedJob.responsibilities.length > 0 && (
+                                <div className="mb-3">
+                                    <h4 className="text-xs font-bold text-slate-700 dark:text-gray-300 uppercase tracking-wider mb-2">Responsibilities</h4>
+                                    <ul className="list-disc pl-5 text-sm text-slate-600 dark:text-gray-300 leading-relaxed">
+                                        {selectedJob.responsibilities.map((r, idx) => (
+                                            <li key={idx}>{r}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+
+                            {selectedJob.requirements && selectedJob.requirements.length > 0 && (
+                                <div className="mb-3">
+                                    <h4 className="text-xs font-bold text-slate-700 dark:text-gray-300 uppercase tracking-wider mb-2">Requirements</h4>
+                                    <ul className="list-disc pl-5 text-sm text-slate-600 dark:text-gray-300 leading-relaxed">
+                                        {selectedJob.requirements.map((r, idx) => (
+                                            <li key={idx}>{r}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+
+                            {selectedJob.benefits && selectedJob.benefits.length > 0 && (
+                                <div>
+                                    <h4 className="text-xs font-bold text-slate-700 dark:text-gray-300 uppercase tracking-wider mb-2">Benefits</h4>
+                                    <ul className="list-disc pl-5 text-sm text-slate-600 dark:text-gray-300 leading-relaxed">
+                                        {selectedJob.benefits.map((b, idx) => (
+                                            <li key={idx}>{b}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
 
@@ -553,6 +648,24 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
                 </div>
+                {/* Preference Chip */}
+                {(typeof window !== 'undefined') && (() => {
+                    try {
+                        const raw = window.localStorage.getItem('jobPreferences');
+                        if (!raw) return null;
+                        const p = JSON.parse(raw || '{}');
+                        if (!p || (!p.jobTitle && !p.location)) return null;
+                        return (
+                            <div className="ml-3 flex items-center gap-2">
+                                <div className="px-3 py-2 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg text-purple-700 dark:text-purple-300 text-sm">
+                                    Showing matches for: <span className="font-semibold">{p.jobTitle || 'Any'}</span>
+                                    {p.location ? <span className="ml-2 text-xs font-medium text-slate-500 dark:text-gray-400">• {p.location}</span> : null}
+                                </div>
+                                <a href="/settings" className="text-sm text-slate-500 dark:text-gray-400 hover:underline">Change</a>
+                            </div>
+                        );
+                    } catch (e) { return null; }
+                })()}
                 <div className="flex gap-3 overflow-x-auto pb-2 md:pb-0">
                     <button 
                         onClick={handleOpenFilters}
@@ -583,7 +696,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                         <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1">Loading jobs…</h3>
                         <p className="text-slate-500 dark:text-gray-400">Querying your configured providers (Muse / Adzuna / Remotive)</p>
                     </div>
-                ) : filteredJobs.length === 0 ? (
+                ) : rankedJobs.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 text-center">
                         <div className="w-20 h-20 bg-slate-100 dark:bg-gray-800 rounded-full flex items-center justify-center mb-6">
                             <Frown size={40} className="text-slate-400 dark:text-gray-500" />
@@ -599,7 +712,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                     </div>
                 ) : (
                     <div className={viewMode === 'card' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" : "flex flex-col gap-4"}>
-                        {filteredJobs.map(job => {
+                        {rankedJobs.map(job => {
                              const isSaved = savedJobIds.has(job.id);
                              const isApplied = job.status === 'Applied';
 
@@ -620,11 +733,12 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                         
                                         <div className="flex items-center gap-4 text-xs text-slate-500 dark:text-gray-400 mb-4">
                                             <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><MapPin size={12} /> {job.location}</span>
-                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><DollarSign size={12} /> {job.salary?.split(' - ')[0]}+</span>
+                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><DollarSign size={12} /> {job.salary ? job.salary.split(' - ')[0] : '—'}</span>
+                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded">{job.employmentType || job.contract_time || ''}</span>
                                         </div>
 
                                         <p className="text-sm text-slate-600 dark:text-gray-300 line-clamp-3 mb-6 flex-1">
-                                            {job.description}
+                                            {excerpt(job)}
                                         </p>
 
                                         <div className="flex items-center justify-between mt-auto pt-4 border-t border-slate-100 dark:border-gray-700">
@@ -657,10 +771,12 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                                  <h4 className="font-bold text-slate-900 dark:text-white text-base truncate group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">{job.title}</h4>
                                                  <span className="text-xs text-slate-400 dark:text-gray-500 whitespace-nowrap">{job.postedAt}</span>
                                              </div>
-                                             <div className="flex items-center gap-4 text-sm text-slate-500 dark:text-gray-400 mt-0.5">
+                                            <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-gray-400 mt-0.5">
                                                  <span className="font-medium text-slate-700 dark:text-gray-300">{job.company}</span>
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
                                                  <span>{job.location}</span>
+                                                 <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
+                                                 <span className="text-xs text-slate-500 dark:text-gray-400">{job.employmentType || job.contract_time || ''}</span>
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
                                                  <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1"><Sparkles size={10} /> {job.matchScore}% Match</span>
                                              </div>
