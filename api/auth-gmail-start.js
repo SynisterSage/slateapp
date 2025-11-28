@@ -22,7 +22,8 @@ export default async function handler(req, res) {
       redirect_uri: redirectUri,
       response_type: 'code',
       // Request OpenID scopes so we can obtain a stable user id (id_token/userinfo)
-      scope: 'openid email profile https://www.googleapis.com/auth/gmail.readonly',
+      // Include send scope so we can send emails on behalf of the user
+      scope: 'openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly',
       access_type: 'offline',
       prompt: 'consent',
       state: state

@@ -10,7 +10,16 @@ function asArray(v: any): string[] {
 export default function normalizeJob(raw: any): Job {
   const id = raw.id || raw.job_id || raw.slug || raw.url || (raw.title ? `${raw.title}-${Math.random().toString(36).slice(2,8)}` : `job-${Date.now()}`);
   const title = raw.title || raw.name || raw.position || raw.role || 'Untitled Role';
-  const company = raw.company?.name || raw.company || raw.employer || raw.organisation || raw.organization || 'Unknown Company';
+  const company = (() => {
+    try {
+      if (!raw) return 'Unknown Company';
+      if (typeof raw.company === 'string') return raw.company;
+      if (raw.company && typeof raw.company === 'object') return raw.company.display_name || raw.company.name || raw.company.label || raw.company.title || JSON.stringify(raw.company);
+      if (typeof raw.employer === 'string') return raw.employer;
+      if (raw.employer && typeof raw.employer === 'object') return raw.employer.name || JSON.stringify(raw.employer);
+      return raw.company || raw.organisation || raw.organization || 'Unknown Company';
+    } catch (e) { return 'Unknown Company'; }
+  })();
   const location = (() => {
     if (raw.location) {
       if (typeof raw.location === 'string') return raw.location;
@@ -27,11 +36,34 @@ export default function normalizeJob(raw: any): Job {
   // Prefer explicit numeric salary ranges when available (Adzuna returns salary_min/salary_max)
   let salary: any = raw.salary || raw.salary_range || raw.remuneration || raw.package || undefined;
   try {
-    const smin = raw.salary_min ?? raw.salaryMin ?? raw.min_salary;
-    const smax = raw.salary_max ?? raw.salaryMax ?? raw.max_salary;
+    // Adzuna may provide salary_min/salary_max or salary_min/salary_max numeric fields
+    const smin = raw.salary_min ?? raw.salaryMin ?? raw.min_salary ?? (raw.salary && (raw.salary.from || raw.salary.min)) ?? undefined;
+    const smax = raw.salary_max ?? raw.salaryMax ?? raw.max_salary ?? (raw.salary && (raw.salary.to || raw.salary.max)) ?? undefined;
     if ((smin || smax) && !salary) {
-      if (smin && smax) salary = `${Number(smin).toLocaleString(undefined, { maximumFractionDigits: 0 })} - ${Number(smax).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-      else salary = `${Number(smin || smax).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+      const fmt = (v: any) => {
+        try { return Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }); } catch (e) { return String(v); }
+      };
+      if (smin && smax) salary = `${fmt(smin)} - ${fmt(smax)}`;
+      else salary = `${fmt(smin || smax)}`;
+    }
+    // Some providers include a nested `salary` object with `currency`/`from`/`to`
+    if (!salary && raw.salary && typeof raw.salary === 'object') {
+      const from = raw.salary.from ?? raw.salary.min;
+      const to = raw.salary.to ?? raw.salary.max;
+      if (from || to) {
+        const fmt = (v: any) => { try { return Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }); } catch (e) { return String(v); } };
+        salary = (from && to) ? `${fmt(from)} - ${fmt(to)}` : `${fmt(from || to)}`;
+      }
+    }
+  } catch (e) {}
+  // If salary still not found, try to extract currency or numeric ranges from HTML/text description
+  try {
+    if (!salary) {
+      const textForSalary = String(raw.description || raw.contents || raw.summary || '');
+      // Match $110,000 - $166,500 | 110k–166k | £35k | 110,000 - 166,500
+      const moneyRe = /(?:[$£€]\s*)?\d{1,3}(?:[\d,]{0,})?(?:\.\d+)?\s*(?:[kK])?(?:\s*(?:-|–|—|to)\s*(?:[$£€]\s*)?\d{1,3}(?:[\d,]{0,})?(?:\.\d+)?\s*(?:[kK])?)/u;
+      const m = textForSalary.match(moneyRe);
+      if (m) salary = m[0].replace(/\s+/g, ' ').trim();
     }
   } catch (e) {}
   const postedAt = raw.postedAt || raw.date_posted || raw.created_at || raw.created || raw.posted || raw.publication_date || '';

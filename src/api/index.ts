@@ -383,14 +383,82 @@ export async function getApplications() {
   return data;
 }
 
+export async function getEmailMessagesByThread(threadId: string) {
+  if (!threadId) return [];
+  const { data, error } = await supabase
+    .from('email_messages')
+    .select('*')
+    .eq('thread_id', threadId)
+    .order('received_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function getEmailMessageById(messageId: string) {
+  if (!messageId) return null;
+  const { data, error } = await supabase
+    .from('email_messages')
+    .select('*')
+    .eq('id', messageId)
+    .limit(1)
+    .single();
+  if (error) {
+    // If single() returns error when not found, return null
+    return null;
+  }
+  return data || null;
+}
+
 export async function createApplication(payload: any) {
-  const { data, error } = await supabase.from('applications').insert(payload).select().single();
+  // Accept both camelCase (frontend) and snake_case (DB) keys.
+  // Map common camelCase keys to snake_case to avoid PostgREST schema errors (e.g. appliedDate -> applied_date).
+  const keyMap: Record<string, string> = {
+    appliedDate: 'applied_date',
+    jobId: 'job_id',
+    resumeId: 'resume_id',
+    emailMessageId: 'email_message_id',
+    threadId: 'thread_id',
+    raw: 'data'
+  };
+
+  const normalized: any = {};
+  for (const k of Object.keys(payload || {})) {
+    const mapped = keyMap[k] || k;
+    normalized[mapped] = (payload as any)[k];
+  }
+
+  // If a user is authenticated in the browser, set owner so RLS allows the insert.
+  try {
+    if (typeof window !== 'undefined' && supabase && supabase.auth) {
+      const userRes: any = await supabase.auth.getUser();
+      const user = userRes && userRes.data ? userRes.data.user : null;
+      if (user && user.id) normalized.owner = user.id;
+    }
+  } catch (e) {
+    // ignore auth fetch errors; server proxy will handle if insert fails
+  }
+
+  const { data, error } = await supabase.from('applications').insert(normalized).select().single();
   if (error) throw error;
   return data;
 }
 
 export async function updateApplication(id: string, payload: any) {
-  const { data, error } = await supabase.from('applications').update(payload).eq('id', id).select().single();
+  // Normalize camelCase keys to snake_case before updating to avoid PostgREST schema errors
+  const keyMap: Record<string, string> = {
+    appliedDate: 'applied_date',
+    jobId: 'job_id',
+    resumeId: 'resume_id',
+    emailMessageId: 'email_message_id',
+    threadId: 'thread_id'
+  };
+  const normalized: any = {};
+  for (const k of Object.keys(payload || {})) {
+    const mapped = keyMap[k] || k;
+    normalized[mapped] = payload[k];
+  }
+
+  const { data, error } = await supabase.from('applications').update(normalized).eq('id', id).select().single();
   if (error) throw error;
   return data;
 }

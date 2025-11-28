@@ -122,14 +122,143 @@ export default async function handler(req, res) {
 
     row = await refreshAccessTokenIfNeeded(row);
     const accessToken = row.access_token;
-
-    // Simple heuristic: look in SENT for common application keywords
-    const msgs = await listMessages(accessToken, 'in:sent (apply OR application OR "applied" OR "resume")');
-    const results = [];
-
+    // Ensure Supabase service role config is available for server-side persistence
     const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
     const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) throw new Error('Supabase service role not configured');
+
+    // Simple heuristic: look in SENT for common application keywords
+    // First: process threads for any existing applications that have a thread_id (replies will be in the same thread)
+    const appsWithThreads = [];
+    try {
+      console.log('sync-gmail: fetching applications for owner', owner);
+      const appsRespTmp = await fetch(`${SUPABASE_URL}/rest/v1/applications?owner=eq.${owner}`, {
+        headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE }
+      });
+      const appsTmp = appsRespTmp.ok ? await appsRespTmp.json() : [];
+      for (const a of (appsTmp || [])) {
+        if (a.thread_id) appsWithThreads.push(a);
+      }
+    } catch (e) {
+      console.warn('sync-gmail: failed to fetch apps for thread processing', e);
+    }
+
+    const processedMessageIds = new Set();
+
+    for (const app of appsWithThreads) {
+      try {
+        // Fetch the full thread; this returns all messages in the conversation
+        const threadResp = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(app.thread_id)}?format=full`, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!threadResp.ok) {
+          // thread may not exist or error; skip
+          continue;
+        }
+          const threadJson = await threadResp.json();
+          const messagesInThread = threadJson.messages || [];
+          console.log('sync-gmail: thread fetched', app.thread_id, 'messagesCount=', messagesInThread.length);
+        for (const full of messagesInThread) {
+          try {
+            if (!full || !full.id) continue;
+            // Skip the original sent message (we tracked email_message_id on the app)
+            if (String(full.id) === String(app.email_message_id)) { processedMessageIds.add(full.id); continue; }
+            if (processedMessageIds.has(full.id)) continue;
+            processedMessageIds.add(full.id);
+
+            // Extract headers
+            const headersArr = (full.payload && full.payload.headers) || [];
+            const getHeader = (name) => {
+              const h = headersArr.find(hh => String(hh.name).toLowerCase() === name.toLowerCase());
+              return h ? h.value : null;
+            };
+            const from = getHeader('From');
+            const to = getHeader('To');
+            const subject = getHeader('Subject') || '';
+            const receivedAt = full.internalDate ? new Date(Number(full.internalDate)).toISOString() : null;
+            const body = full.snippet || '';
+
+            // Avoid duplicate persistence: check email_messages by id
+            try {
+              const existsResp = await fetch(`${SUPABASE_URL}/rest/v1/email_messages?id=eq.${encodeURIComponent(full.id)}`, {
+                headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE }
+              });
+              if (existsResp.ok) {
+                const rows = await existsResp.json();
+                if (rows && rows.length) continue; // already persisted
+              }
+            } catch (e) { /* ignore check errors and attempt insert */ }
+
+            // Persist email_message row
+            const emailRow = {
+              id: full.id,
+              provider: 'google',
+              message_id: full.id,
+              thread_id: full.threadId || app.thread_id,
+              from_address: from,
+              to_address: to,
+              subject: subject,
+              body: body,
+              headers: headersArr ? headersArr.reduce((acc, h) => ({ ...acc, [h.name]: h.value }), {}) : {},
+              raw: full,
+              received_at: receivedAt,
+              owner: owner
+            };
+            try {
+              console.log('sync-gmail: persisting email_message for message', full.id, 'thread', full.threadId || app.thread_id);
+              await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+                body: JSON.stringify(emailRow)
+              });
+            } catch (e) { console.warn('sync-gmail: failed to persist email_message from thread', e); }
+
+            // Determine new status from keywords
+            const lower = (`${subject || ''} ${body || ''}`).toLowerCase();
+            let newStatus = null;
+            if (lower.includes('interview')) newStatus = 'Interviewing';
+            else if (lower.includes('offer')) newStatus = 'Offer';
+            else if (lower.includes('reject') || lower.includes('regret') || lower.includes('not selected')) newStatus = 'Rejected';
+
+            if (newStatus) {
+              try {
+                console.log('sync-gmail: patching application', app.id, 'status->', newStatus);
+                await fetch(`${SUPABASE_URL}/rest/v1/applications?id=eq.${encodeURIComponent(app.id)}`, {
+                  method: 'PATCH',
+                  headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json' , Prefer: 'return=representation'},
+                  body: JSON.stringify({ status: newStatus, parsed_from_email: true, email_message_id: full.id, last_synced_at: new Date().toISOString() })
+                });
+                // create application event
+                console.log('sync-gmail: creating status_change event for app', app.id);
+                await fetch(`${SUPABASE_URL}/rest/v1/application_events`, {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+                  body: JSON.stringify({ id: randomUUID(), application_id: app.id, owner: owner, type: 'status_change', payload: { from: app.status, to: newStatus, detected_from: 'email_thread' }, created_at: new Date().toISOString() })
+                });
+              } catch (e) {
+                console.warn('sync-gmail: failed to update app status from thread message', e);
+              }
+            } else {
+              // Generic email_received event
+              try {
+                console.log('sync-gmail: creating email_received event for app', app.id);
+                await fetch(`${SUPABASE_URL}/rest/v1/application_events`, {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+                  body: JSON.stringify({ id: randomUUID(), application_id: app.id, owner: owner, type: 'email_received', payload: { email_message_id: full.id, subject, snippet: full.snippet }, created_at: new Date().toISOString() })
+                });
+              } catch (e) { console.warn('sync-gmail: failed to persist application_event for thread message', e); }
+            }
+          } catch (e) {
+            console.warn('sync-gmail: failed processing message in thread', e);
+          }
+        }
+      } catch (e) {
+        console.warn('sync-gmail: failed to fetch/process thread', app.thread_id, e);
+      }
+    }
+
+    // After processing threads, fall back to scanning recent sent messages for any other signals
+    const msgs = await listMessages(accessToken, 'in:sent (apply OR application OR "applied" OR "resume")');
+    const results = [];
 
     // Fetch existing applications and jobs for the owner to attempt matching
     const appsResp = await fetch(`${SUPABASE_URL}/rest/v1/applications?owner=eq.${owner}`, {
@@ -159,6 +288,22 @@ export default async function handler(req, res) {
 
         // Use snippet as body fallback (decoding parts is more involved)
         const body = full.snippet || '';
+
+        // Avoid duplicate persistence: check email_messages by id
+        try {
+          const existsResp = await fetch(`${SUPABASE_URL}/rest/v1/email_messages?id=eq.${encodeURIComponent(full.id)}`, {
+            headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE }
+          });
+          if (existsResp.ok) {
+            const rows = await existsResp.json();
+            if (rows && rows.length) {
+              // Already persisted; skip processing this message to avoid duplicates
+              continue;
+            }
+          }
+        } catch (e) {
+          // ignore check errors and attempt insert
+        }
 
         // Persist email_message row
         const emailRow = {
@@ -191,6 +336,19 @@ export default async function handler(req, res) {
 
         // Attempt to match this email to an existing application or job
         let matchedApp = null;
+
+        // Fast path: match by thread_id if available (will match replies in same conversation)
+        try {
+          if (full.threadId) {
+            const byThread = apps.find(a => (a.thread_id && String(a.thread_id) === String(full.threadId)) || (a.email_message_id && String(a.email_message_id) === String(full.threadId)));
+            if (byThread) { matchedApp = byThread; console.log('sync-gmail: matched app by thread', matchedApp.id, 'for message', full.id); }
+          }
+        } catch (e) { /* ignore */ }
+
+        // If not matched by thread, fall through to other heuristics
+        if (!matchedApp) {
+          // continue with other matching heuristics below
+        }
         const searchText = `${subject || ''} ${body || ''}`.toLowerCase();
 
         // 1) Try matching by job url present in apps.raw or jobs
@@ -251,6 +409,7 @@ export default async function handler(req, res) {
           const updatePayload = { parsed_from_email: true, email_message_id: full.id, last_synced_at: new Date().toISOString() };
           if (newStatus) updatePayload.status = newStatus;
 
+          console.log('sync-gmail: updating matched application', matchedApp.id, 'from message', full.id, 'newStatus=', newStatus);
           await fetch(`${SUPABASE_URL}/rest/v1/applications?id=eq.${matchedApp.id}`, {
             method: 'PATCH',
             headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },

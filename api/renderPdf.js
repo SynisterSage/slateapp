@@ -5,7 +5,18 @@ export default async function handler(req, res) {
   try {
     try { const dot = await import('dotenv'); dot.config && dot.config({ path: process.cwd() + '/.env.local' }); } catch (e) {}
 
-    const body = req.method === 'POST' ? (await parseJsonBody(req)) : req.query || (req.url ? (await import('url')).parse(req.url, true).query : {});
+    // Support both streaming Node requests and dev-server's pre-parsed `fakeReq.body`
+    let body = {};
+    if (req.method === 'POST') {
+      if (typeof req.body !== 'undefined' && req.body !== null) {
+        body = req.body;
+      } else {
+        body = (await parseJsonBody(req)) || {};
+      }
+    } else {
+      body = req.query || (req.url ? (await import('url')).parse(req.url, true).query : {});
+    }
+    try { console.log('renderPdf: request', { method: req.method, headers: req.headers && req.headers['content-type'], bodyPreview: JSON.stringify(body).slice(0,200) }); } catch (e) {}
     const id = body && (body.id || body.resumeId);
     if (!id) return res.status(400).json({ error: 'Missing id' });
 

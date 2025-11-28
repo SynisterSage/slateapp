@@ -2,6 +2,7 @@ import http from 'http';
 import url from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
+import { createRequire } from 'module';
 import jobsHandler from '../api/jobs.js';
 
 // Load environment variables from .env.local (preferred) or .env so handlers see keys
@@ -158,12 +159,45 @@ const server = http.createServer(async (req, res) => {
         try { console.log('dev-server: /api/sync-gmail headers ->', req.headers); } catch (e) {}
         const handler = (await import('../api/sync-gmail.js')).default || (await import('../api/sync-gmail.js'));
         await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/ats-debug') {
+        // Dev-only diagnostics for ATS aggregator (lever/greenhouse)
+        try {
+          // Use createRequire to load the CommonJS atsAggregator from this ESM module
+          const require = createRequire(import.meta.url);
+          const agg = require('../server/atsAggregator');
+          const diagFn = (agg && agg.fetchATSDiagnostics) || (agg && agg.default && agg.default.fetchATSDiagnostics);
+          if (typeof diagFn === 'function') {
+            console.log('dev-server: running ATS diagnostics');
+            const diag = await diagFn();
+            return fakeRes.json({ ok: true, diagnostics: diag });
+          }
+          return fakeRes.json({ ok: false, error: 'ATS diagnostics not available' });
+        } catch (e) {
+          console.error('dev-server: ats-debug failed', e);
+          return fakeRes.json({ ok: false, error: String(e) });
+        }
       } else if (parsed.pathname === '/api/check-gmail') {
         const handler = (await import('../api/check-gmail.js')).default || (await import('../api/check-gmail.js'));
         await handler(fakeReq, fakeRes);
       } else if (parsed.pathname === '/api/list-gmail-accounts') {
         const handler = (await import('../api/list-gmail-accounts.js')).default || (await import('../api/list-gmail-accounts.js'));
         await handler(fakeReq, fakeRes);
+      } else if (parsed.pathname === '/api/extract-job-emails') {
+        try {
+          const handler = (await import('../api/extract-job-emails.js')).default || (await import('../api/extract-job-emails.js'));
+          await handler(fakeReq, fakeRes);
+        } catch (e) {
+          console.error('dev-server: failed to route /api/extract-job-emails', e);
+          fakeRes.status(500).json({ error: String(e) });
+        }
+      } else if (parsed.pathname === '/api/send-application') {
+        try {
+          const handler = (await import('../api/send-application.js')).default || (await import('../api/send-application.js'));
+          await handler(fakeReq, fakeRes);
+        } catch (e) {
+          console.error('dev-server: failed to route /api/send-application', e);
+          fakeRes.status(500).json({ error: String(e) });
+        }
       } else if (parsed.pathname === '/api/remove-gmail-account') {
         const handler = (await import('../api/remove-gmail-account.js')).default || (await import('../api/remove-gmail-account.js'));
         await handler(fakeReq, fakeRes);
@@ -188,3 +222,67 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Dev API server listening on http://localhost:${PORT}`);
 });
+
+// Optional background poll: run /api/sync-gmail for connected owners on an interval
+// Enable via env var `DEV_GMAIL_POLL=true`. Interval can be configured with `DEV_GMAIL_POLL_MS` (default 5 minutes).
+if (process.env.DEV_GMAIL_POLL === 'true') {
+  const POLL_MS = process.env.DEV_GMAIL_POLL_MS ? parseInt(process.env.DEV_GMAIL_POLL_MS) : 5 * 60 * 1000;
+  const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+  const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+    console.warn('DEV_GMAIL_POLL enabled but Supabase service role not configured; disabling poll');
+  } else {
+    console.log('DEV_GMAIL_POLL enabled. Poll interval (ms)=', POLL_MS);
+    // Poll function
+    const runPoll = async () => {
+      try {
+        console.log('dev-server: gmail poll: fetching connected oauth_providers');
+        const resp = await fetch(`${SUPABASE_URL}/rest/v1/oauth_providers?provider=eq.google`, {
+          headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE }
+        });
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => '');
+          console.warn('dev-server: gmail poll: failed to fetch oauth_providers', resp.status, txt);
+          return;
+        }
+        const rows = await resp.json();
+        const owners = Array.from(new Set((rows || []).map(r => r.owner).filter(Boolean)));
+        if (!owners.length) {
+          console.log('dev-server: gmail poll: no connected owners found');
+          return;
+        }
+
+        // Import handler once per poll
+        let syncHandler = null;
+        try {
+          syncHandler = (await import('../api/sync-gmail.js')).default || (await import('../api/sync-gmail.js'));
+        } catch (e) {
+          console.error('dev-server: gmail poll: failed to import sync handler', e);
+          return;
+        }
+
+        for (const owner of owners) {
+          try {
+            console.log('dev-server: gmail poll: invoking sync for owner', owner);
+            const fakeReq = { query: { owner }, headers: {} };
+            const fakeRes = makeResNode({
+              headersSent: false,
+              setHeader: () => {},
+              end: () => {}
+            });
+            // call handler and don't await long; allow handler to run
+            await syncHandler(fakeReq, fakeRes);
+          } catch (e) {
+            console.warn('dev-server: gmail poll: sync failed for owner', owner, e);
+          }
+        }
+      } catch (e) {
+        console.error('dev-server: gmail poll failed', e);
+      }
+    };
+
+    // Run immediately then schedule
+    runPoll();
+    setInterval(runPoll, POLL_MS);
+  }
+}

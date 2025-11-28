@@ -7,7 +7,8 @@ import {
     FileText, ChevronDown, Frown
 } from 'lucide-react';
 // Jobs and resumes now come from providers and Supabase
-import { searchJobs as apiSearchJobs, getResumes } from '../src/api';
+import { searchJobs as apiSearchJobs, getResumes, createApplication } from '../src/api';
+import supabase from '../src/lib/supabaseClient';
 import { Job } from '../types';
 import computeMatchScore from '../src/lib/matchJob';
 
@@ -277,12 +278,166 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
     // --- Components ---
 
     const ConfirmApplyModal = () => {
+        const [accounts, setAccounts] = React.useState<any[]>([]);
+        const [selectedAccountId, setSelectedAccountId] = React.useState<string>('');
+        const [subjectText, setSubjectText] = React.useState<string>('');
+        const [bodyText, setBodyText] = React.useState<string>('');
+        const [isSending, setIsSending] = React.useState<boolean>(false);
+        const [candidateEmails, setCandidateEmails] = React.useState<string[]>([]);
+        const [recipientEmail, setRecipientEmail] = React.useState<string>('');
+        const [detectedApplyUrl, setDetectedApplyUrl] = React.useState<string | null>(null);
+
+        React.useEffect(() => {
+            if (!confirmingJobId) return;
+            (async () => {
+                try {
+                    const job = jobs.find(j => j.id === confirmingJobId);
+                    setSubjectText(`Application: ${job?.title} at ${job?.company}`);
+
+                    // Build a nicer default message using resume personal info when available
+                    const resumeIdToUse = applicationResumeId || (resumes && resumes[0] && resumes[0].id) || null;
+                    const resumeObj = resumes.find(r => r.id === resumeIdToUse) || null;
+                    const name = resumeObj?.personalInfo?.fullName || resumeObj?.personalInfo?.name || '';
+                    const email = resumeObj?.personalInfo?.email || '';
+                    const phone = resumeObj?.personalInfo?.phone || '';
+
+                    const lines = [];
+                    lines.push(`Hi ${job?.contact_name || 'Hiring Team'},`);
+                    lines.push('');
+                    lines.push(`I'm excited to apply for the ${job?.title} role at ${job?.company}. My background includes hands-on experience with the skills required for this role and a track record of delivering results.`);
+                    lines.push('');
+                    lines.push('Please find my resume attached for your review. I look forward to the possibility of discussing how I can contribute to your team.');
+                    lines.push('');
+                    lines.push('Best regards,');
+                    lines.push(name || '');
+                    if (email || phone) lines.push(`${email}${email && phone ? ' • ' : ''}${phone}`);
+
+                    setBodyText(lines.join('\n'));
+
+                    // Resolve owner via Supabase auth if available so server can return the owner's connected accounts
+                    let ownerParam = null;
+                    try {
+                        const u = await supabase.auth.getUser();
+                        const user = u && (u as any).data ? (u as any).data.user : null;
+                        if (user && user.id) ownerParam = user.id;
+                    } catch (e) {
+                        // ignore
+                    }
+
+                    const listUrl = ownerParam ? `/api/list-gmail-accounts?owner=${encodeURIComponent(ownerParam)}` : '/api/list-gmail-accounts';
+                    // Try to include the Supabase access token in the request so the server can resolve owner
+                    let headers: any = {};
+                    try {
+                        const s = await supabase.auth.getSession();
+                        const token = s && (s as any).data && (s as any).data.session ? (s as any).data.session.access_token : null;
+                        if (token) headers.Authorization = `Bearer ${token}`;
+                    } catch (e) {
+                        // ignore
+                    }
+                    const resp = await fetch(listUrl, { headers });
+                    if (resp.ok) {
+                        const json = await resp.json();
+                        const rows = json.accounts || [];
+                        setAccounts(rows);
+                        console.debug('ConfirmApplyModal: loaded gmail accounts', rows);
+                        setSelectedAccountId(rows[0]?.id || '');
+                    } else {
+                        setAccounts([]);
+                    }
+                    // Attempt to extract potential recipient emails from the job object
+                    try {
+                        const exResp = await fetch('/api/extract-job-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job }) });
+                        if (exResp.ok) {
+                            const exJson = await exResp.json();
+                            const found = (exJson && exJson.emails) || [];
+                            setCandidateEmails(found || []);
+                            setDetectedApplyUrl(exJson && exJson.applyUrl ? exJson.applyUrl : (job && (job.url || job.apply_url || job.link)));
+                            // prefer first candidate if looks valid
+                            if (found && found.length) setRecipientEmail(found[0]);
+                        }
+                    } catch (e) {
+                        console.debug('ConfirmApplyModal: extract-job-emails failed', e);
+                    }
+                } catch (e) {
+                    console.warn('Failed to load gmail accounts', e);
+                    setAccounts([]);
+                }
+            })();
+        }, [confirmingJobId]);
+
+
         if (!confirmingJobId) return null;
         const job = jobs.find(j => j.id === confirmingJobId);
-        
+
+        const handleSend = async () => {
+            if (!selectedAccountId) return alert('Select a sender account');
+            setIsSending(true);
+                try {
+                const payload = { job, resumeId: applicationResumeId || resumes[0]?.id, senderAccountId: selectedAccountId, subject: subjectText, bodyHtml: bodyText.replace(/\n/g, '<br/>'), toEmail: recipientEmail };
+                const resp = await fetch('/api/send-application', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                let json = null;
+                if (!resp.ok) {
+                    try { json = await resp.json(); } catch (e) { json = null; }
+                    // If server says recipient is missing, try extracting candidate emails and retry
+                    if (json && json.error && json.error.toLowerCase().includes('no recipient')) {
+                        try {
+                            const exRespNow = await fetch('/api/extract-job-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job }) });
+                            if (exRespNow.ok) {
+                                const exJsonNow = await exRespNow.json();
+                                const cand = (exJsonNow && exJsonNow.emails) || [];
+                                if (cand && cand.length) {
+                                    // prompt user to use first candidate
+                                    if (window.confirm(`Found potential recipient emails: ${cand.join(', ')}. Use the first one and retry send?`)) {
+                                        setRecipientEmail(cand[0]);
+                                        // retry once with selected recipient
+                                        const retryPayload = { ...payload, toEmail: cand[0] };
+                                        const retryResp = await fetch('/api/send-application', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(retryPayload) });
+                                        if (retryResp.ok) {
+                                            const jr = await retryResp.json();
+                                            console.debug('send-application retry result', jr);
+                                            try { handleConfirmApply(); } catch (e) {}
+                                            alert('Application sent');
+                                            setConfirmingJobId(null);
+                                            return;
+                                        }
+                                    }
+                                }
+                                // If extractor returned an applyUrl, offer to open it
+                                const applyUrl = exJsonNow && exJsonNow.applyUrl ? exJsonNow.applyUrl : (job.url || job.apply_url || job.link || json.applyUrl);
+                                if (applyUrl && window.confirm('No recipient email was found for this job. Open the job apply URL to apply manually?')) {
+                                    window.open(applyUrl, '_blank');
+                                    setConfirmingJobId(null);
+                                    return;
+                                }
+                            }
+                        } catch (ee) { /* ignore extractor errors */ }
+                        throw new Error(json.error || 'No recipient email');
+                    }
+                    const txt = (json && JSON.stringify(json)) || (await resp.text().catch(() => ''));
+                    throw new Error(txt || `Send failed: ${resp.status}`);
+                }
+                json = await resp.json();
+
+                // Server persists the application; update UI locally and avoid client-side direct DB insert (403)
+                console.debug('send-application result', json);
+                try {
+                    // Mark the job as applied in the UI
+                    handleConfirmApply();
+                } catch (e) { /* ignore UI update errors */ }
+
+                alert('Application sent');
+                setConfirmingJobId(null);
+            } catch (e) {
+                console.error('Send failed', e);
+                alert('Failed to send application: ' + String(e));
+            } finally {
+                setIsSending(false);
+            }
+        };
+
         return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setConfirmingJobId(null)}>
-                <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md p-6 animate-in scale-95 duration-200 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
+                <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl p-6 animate-in scale-95 duration-200 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
                     <div className="flex justify-between items-start mb-4">
                          <div className="w-12 h-12 bg-purple-100 dark:bg-purple-900/30 rounded-full flex items-center justify-center text-purple-600 dark:text-purple-400">
                             <ExternalLink size={24} />
@@ -291,50 +446,78 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                             <X size={20} />
                         </button>
                     </div>
-                   
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1">Apply to {job?.company}</h3>
-                    <p className="text-slate-600 dark:text-gray-400 text-sm mb-6">
-                        Review your application details for <span className="font-semibold text-slate-800 dark:text-gray-200">{job?.title}</span>.
-                    </p>
 
-                    <div className="space-y-4 mb-8">
+                    <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1">Apply to {job?.company}</h3>
+                    <p className="text-slate-600 dark:text-gray-400 text-sm mb-6">Review and edit the email before sending to <span className="font-semibold">{job?.title}</span>.</p>
+
+                    <div className="grid grid-cols-2 gap-4 mb-4">
                         <div>
                             <label className="block text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-2">Select Resume</label>
-                            <div className="relative">
-                                <select 
-                                    value={applicationResumeId}
-                                    onChange={(e) => setApplicationResumeId(e.target.value)}
-                                    className="w-full appearance-none bg-slate-50 dark:bg-gray-900 border border-slate-200 dark:border-gray-700 text-slate-700 dark:text-gray-200 rounded-xl py-3 pl-4 pr-10 font-medium focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none"
-                                >
-                                    {resumes.map(r => (
-                                        <option key={r.id} value={r.id}>{r.title} ({r.lastUpdated})</option>
-                                    ))}
-                                </select>
-                                <ChevronDown className="absolute right-3 top-3.5 text-slate-400 pointer-events-none" size={18} />
-                            </div>
+                            <select value={applicationResumeId} onChange={(e) => setApplicationResumeId(e.target.value)} className="w-full rounded-xl border p-2 bg-slate-50 dark:bg-gray-900">
+                                {resumes.map(r => (<option key={r.id} value={r.id}>{r.title}</option>))}
+                            </select>
                         </div>
 
-                        <div className="bg-purple-50 dark:bg-purple-900/20 rounded-xl p-3 flex gap-3 items-start">
-                            <Sparkles size={16} className="text-purple-600 dark:text-purple-400 mt-0.5 shrink-0" />
-                            <p className="text-xs text-purple-700 dark:text-purple-300 leading-relaxed">
-                                We'll attach your latest tuned version. Your resume match score for this role is <span className="font-bold">{job?.matchScore}%</span>.
-                            </p>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-2">Send From</label>
+                            <select value={selectedAccountId} onChange={(e) => setSelectedAccountId(e.target.value)} className="w-full rounded-xl border p-2 bg-slate-50 dark:bg-gray-900">
+                                {accounts.length === 0 ? <option value="">No connected Gmail accounts</option> : accounts.map(a => (<option key={a.id} value={a.id}>{a.email || a.name || a.provider_user_id}</option>))}
+                            </select>
                         </div>
                     </div>
 
-                    <div className="flex gap-3">
-                        <button 
-                            onClick={() => setConfirmingJobId(null)} 
-                            className="flex-1 py-3 text-slate-600 dark:text-gray-300 font-medium hover:bg-slate-100 dark:hover:bg-gray-700 rounded-xl transition-colors"
-                        >
-                            Cancel
-                        </button>
-                        <button 
-                            onClick={handleConfirmApply} 
-                            className="flex-1 py-3 bg-purple-600 text-white font-bold rounded-xl hover:bg-purple-700 transition-colors shadow-lg shadow-purple-200 dark:shadow-none flex items-center justify-center gap-2"
-                        >
-                            Confirm Apply
-                        </button>
+                    <div className="mb-4">
+                        <label className="block text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-2">Subject</label>
+                        <input value={subjectText} onChange={(e) => setSubjectText(e.target.value)} className="w-full rounded-xl border p-3 bg-white dark:bg-gray-800" />
+                    </div>
+
+                    <div className="mb-4">
+                        <label className="block text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-2">Message</label>
+                        <textarea value={bodyText} onChange={(e) => setBodyText(e.target.value)} rows={6} className="w-full rounded-xl border p-3 bg-white dark:bg-gray-800" />
+                    </div>
+
+                    <div className="mb-4">
+                        <label className="block text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-2">Recipient</label>
+                        <div className="flex gap-2 mb-2">
+                            <input value={recipientEmail} onChange={(e) => setRecipientEmail(e.target.value)} placeholder="recipient@example.com" className="flex-1 rounded-xl border p-2 bg-white dark:bg-gray-800" />
+                            <button onClick={async () => {
+                                try {
+                                    const job = jobs.find(j => j.id === confirmingJobId);
+                                    const r = await fetch('/api/extract-job-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job }) });
+                                    if (r.ok) {
+                                        const j = await r.json();
+                                        const found = (j && j.emails) || [];
+                                        setCandidateEmails(found || []);
+                                        setDetectedApplyUrl(j && j.applyUrl ? j.applyUrl : (job && (job.url || job.apply_url || job.link)));
+                                        if (found && found.length) setRecipientEmail(found[0]);
+                                        alert(found && found.length ? `Found: ${found.join(', ')}` : 'No emails found on job page');
+                                    } else {
+                                        alert('Failed to extract emails');
+                                    }
+                                } catch (e) {
+                                    console.warn('extract failed', e);
+                                    alert('Failed to extract emails');
+                                }
+                            }} className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-gray-800 border">Find recipients</button>
+                        </div>
+                        {candidateEmails && candidateEmails.length > 0 && (
+                            <div className="text-sm text-slate-600 dark:text-gray-300">
+                                <div className="font-semibold mb-1">Candidates:</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {candidateEmails.map((e, idx) => (
+                                        <button key={idx} onClick={() => setRecipientEmail(e)} className="px-2 py-1 rounded-lg border bg-slate-50 dark:bg-gray-800 text-xs">{e}</button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        {detectedApplyUrl && (
+                            <div className="mt-2 text-xs text-slate-500 dark:text-gray-400">Apply URL: <a href={detectedApplyUrl} target="_blank" rel="noreferrer" className="text-purple-600 dark:text-purple-400">Open</a></div>
+                        )}
+                    </div>
+
+                    <div className="flex gap-3 justify-end">
+                        <button onClick={() => setConfirmingJobId(null)} className="py-2 px-4 text-slate-600 dark:text-gray-300 rounded-xl border">Cancel</button>
+                        <button onClick={handleSend} disabled={isSending} className="py-2 px-4 bg-purple-600 text-white rounded-xl font-bold">{isSending ? 'Sending…' : 'Send Application'}</button>
                     </div>
                 </div>
             </div>
@@ -439,11 +622,17 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                         </button>
                          <div className="flex items-center gap-3 mb-2">
                             <div className="w-10 h-10 bg-white dark:bg-gray-800 rounded-lg border border-slate-200 dark:border-gray-700 flex items-center justify-center text-lg font-bold text-slate-700 dark:text-gray-200 shadow-sm">
-                                {selectedJob.company.charAt(0)}
+                                {String(selectedJob.company || '').charAt(0)}
                             </div>
-                            <div>
+                            <div className="flex-1">
                                 <h2 className="text-xl font-bold text-slate-900 dark:text-white leading-tight">{selectedJob.title}</h2>
-                                <p className="text-slate-500 dark:text-gray-400 font-medium">{selectedJob.company}</p>
+                                <div className="flex items-center gap-3">
+                                  <p className="text-slate-500 dark:text-gray-400 font-medium">{String(selectedJob.company || '')}</p>
+                                  {/* Move original posting link out of description: show near title/company */}
+                                  {selectedJob.sourceUrl && (
+                                    <a href={selectedJob.sourceUrl} target="_blank" rel="noreferrer" className="text-xs text-purple-600 dark:text-purple-400 font-medium hover:underline">View original posting</a>
+                                  )}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -474,12 +663,14 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                 <MapPin size={14} /> {selectedJob.location}
                             </div>
                          </div>
-                         <div className="p-3 bg-slate-50 dark:bg-gray-800 rounded-lg border border-slate-100 dark:border-gray-700">
-                            <span className="text-xs text-slate-400 dark:text-gray-500 uppercase font-bold block mb-1">Salary</span>
-                            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-gray-200">
-                                <DollarSign size={14} /> {selectedJob.salary || 'Competitive'}
-                            </div>
-                         </div>
+                                                 {selectedJob.salary && (
+                                                     <div className="p-3 bg-slate-50 dark:bg-gray-800 rounded-lg border border-slate-100 dark:border-gray-700">
+                                                            <span className="text-xs text-slate-400 dark:text-gray-500 uppercase font-bold block mb-1">Salary</span>
+                                                            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-gray-200">
+                                                                    <DollarSign size={14} /> {String(selectedJob.salary).replace(/^[\s$£€]+/, '')}
+                                                            </div>
+                                                     </div>
+                                                 )}
                          <div className="p-3 bg-slate-50 dark:bg-gray-800 rounded-lg border border-slate-100 dark:border-gray-700">
                             <span className="text-xs text-slate-400 dark:text-gray-500 uppercase font-bold block mb-1">Posted</span>
                             <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-gray-200">
@@ -500,11 +691,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                             <p className="whitespace-pre-line mb-3">{selectedJob.cleanDescription || selectedJob.description || (selectedJob.raw && (selectedJob.raw.description || selectedJob.raw.contents))}</p>
 
                             {/* If provider truncated the snippet (common), offer a link to the original posting */}
-                            {selectedJob.sourceUrl && (
-                                <p className="text-sm mt-2">
-                                    <a href={selectedJob.sourceUrl} target="_blank" rel="noreferrer" className="text-purple-600 dark:text-purple-400 font-medium hover:underline">View original posting</a>
-                                </p>
-                            )}
+                            {/* original posting link moved to header */}
 
                             {selectedJob.responsibilities && selectedJob.responsibilities.length > 0 && (
                                 <div className="mb-3">
@@ -722,20 +909,22 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                         <div className="flex justify-between items-start mb-4">
                                             <div className="flex gap-4">
                                                 <div className="w-12 h-12 bg-slate-100 dark:bg-gray-800 rounded-xl flex items-center justify-center text-slate-500 dark:text-gray-400 font-bold text-lg shrink-0">
-                                                    {job.company.charAt(0)}
+                                                    {String(job.company || '').charAt(0)}
                                                 </div>
                                                 <div>
                                                     <h4 className="font-bold text-slate-900 dark:text-white text-lg leading-tight group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors line-clamp-1">{job.title}</h4>
-                                                    <p className="text-sm text-slate-500 dark:text-gray-400 font-medium">{job.company}</p>
+                                                    <p className="text-sm text-slate-500 dark:text-gray-400 font-medium">{String(job.company || '')}</p>
                                                 </div>
                                             </div>
                                         </div>
                                         
-                                        <div className="flex items-center gap-4 text-xs text-slate-500 dark:text-gray-400 mb-4">
-                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><MapPin size={12} /> {job.location}</span>
-                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><DollarSign size={12} /> {job.salary ? job.salary.split(' - ')[0] : '—'}</span>
-                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded">{job.employmentType || job.contract_time || ''}</span>
-                                        </div>
+                                                                                <div className="flex items-center gap-4 text-xs text-slate-500 dark:text-gray-400 mb-4">
+                                                                                        <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><MapPin size={12} /> {job.location}</span>
+                                                                                        {job.salary ? (
+                                                                                            <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded"><DollarSign size={12} /> {String(job.salary).replace(/^[\s$£€]+/, '').split(/\s*[–—-]\s*|\s*-\s*|\s+to\s+/)[0]}</span>
+                                                                                        ) : null}
+                                                                                        <span className="flex items-center gap-1 bg-slate-50 dark:bg-gray-800/50 px-2 py-1 rounded">{job.employmentType || job.contract_time || ''}</span>
+                                                                                </div>
 
                                         <p className="text-sm text-slate-600 dark:text-gray-300 line-clamp-3 mb-6 flex-1">
                                             {excerpt(job)}
@@ -764,7 +953,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                  return (
                                      <div key={job.id} onClick={() => setSelectedJob(job)} className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-slate-200 dark:border-gray-700 hover:border-purple-300 dark:hover:border-purple-600 transition-all cursor-pointer flex items-center gap-4 group">
                                          <div className="w-12 h-12 bg-slate-100 dark:bg-gray-800 rounded-xl flex items-center justify-center text-slate-500 dark:text-gray-400 font-bold text-lg shrink-0">
-                                            {job.company.charAt(0)}
+                                            {String(job.company || '').charAt(0)}
                                          </div>
                                          <div className="flex-1 min-w-0">
                                              <div className="flex justify-between items-start">
@@ -772,7 +961,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                                  <span className="text-xs text-slate-400 dark:text-gray-500 whitespace-nowrap">{job.postedAt}</span>
                                              </div>
                                             <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-gray-400 mt-0.5">
-                                                 <span className="font-medium text-slate-700 dark:text-gray-300">{job.company}</span>
+                                                 <span className="font-medium text-slate-700 dark:text-gray-300">{String(job.company || '')}</span>
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
                                                  <span>{job.location}</span>
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
