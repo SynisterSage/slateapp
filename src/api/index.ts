@@ -352,7 +352,9 @@ export async function searchJobs(q = '') {
     if (!res.ok) throw new Error(`Job proxy error: ${res.status}`);
     const json = await res.json();
     const raw = json.jobs || json.results || [];
-    return (raw || []).map((r: any) => normalizeJob(r));
+    const normalized = (raw || []).map((r: any) => normalizeJob(r));
+    // Respect server-side ordering (server now randomizes provider ordering).
+    return normalized;
   } catch (err) {
     console.warn('Job search proxy failed, falling back to client providers', err);
     try {

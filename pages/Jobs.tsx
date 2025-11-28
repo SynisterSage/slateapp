@@ -37,7 +37,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
 
     // Utility: safe excerpt from job description/cleanDescription
     const excerpt = (job: Job, n = 180) => {
-        const raw = (job as any).cleanDescription || job.description || '';
+        const raw = (job as any).cleanDescription || job.description || (job as any).raw?.descriptionBreakdown?.oneSentenceJobSummary || (job as any).raw?.description || '';
         const stripped = String(raw).replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
         if (!stripped) return '';
         if (stripped.length <= n) return stripped;
@@ -914,6 +914,11 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                                 <div>
                                                     <h4 className="font-bold text-slate-900 dark:text-white text-lg leading-tight group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors line-clamp-1">{job.title}</h4>
                                                     <p className="text-sm text-slate-500 dark:text-gray-400 font-medium">{String(job.company || '')}</p>
+                                                    {job.source ? (
+                                                        <div className="mt-1">
+                                                            <span className="inline-block text-xs font-semibold bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded">{String(job.source).toUpperCase()}</span>
+                                                        </div>
+                                                    ) : null}
                                                 </div>
                                             </div>
                                         </div>

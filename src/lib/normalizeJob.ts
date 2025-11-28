@@ -238,5 +238,6 @@ export default function normalizeJob(raw: any): Job {
     seniority: parsed.seniority,
     skills: parsed.skills,
     sourceUrl: sourceUrl as any,
+    source: (raw.source || raw.provider || (raw.owner && raw.owner.companyName) || undefined) as any,
   } as Job;
 }

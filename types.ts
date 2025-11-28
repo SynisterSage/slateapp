@@ -136,6 +136,7 @@ export interface Job {
   employmentType?: string; // e.g. Full-time, Contract
   seniority?: string; // e.g. Senior, Junior
   skills?: string[];
+  source?: string;
 }
 
 export interface Application {
