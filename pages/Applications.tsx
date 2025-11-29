@@ -110,6 +110,20 @@ export const Applications = () => {
         return () => { mounted = false; };
     }, []);
 
+        // Listen for selection events triggered by SearchResults / TopNav
+        useEffect(() => {
+            const onSelect = (e: any) => {
+                try {
+                    const id = e && e.detail && e.detail.id;
+                    if (!id) return;
+                    const found = applications.find(a => String(a.id) === String(id));
+                    if (found) setSelectedApp(found);
+                } catch (err) {}
+            };
+            window.addEventListener('app:selectApplication', onSelect as EventListener);
+            return () => window.removeEventListener('app:selectApplication', onSelect as EventListener);
+        }, [applications]);
+
     const handleSync = async () => {
         setIsSyncing(true);
         try {

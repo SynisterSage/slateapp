@@ -4,7 +4,7 @@ import {
   PanelRightClose, PanelRightOpen, Target, PenTool, History,
   AlertCircle, CheckCircle2, Check, Plus, Trash2, GripVertical
 } from 'lucide-react';
-import { Resume, AnalysisIssue } from '../types';
+import { Resume, AnalysisIssue, ParsedResume } from '../types';
 import AppearancePanel from '../components/AppearancePanel';
 import { ChevronDown } from 'lucide-react';
 import AnalysisCard from '../components/AnalysisCard';
@@ -328,7 +328,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
     const [isLayoutModalOpen, setIsLayoutModalOpen] = useState(false);
     const [selectedLayout, setSelectedLayout] = useState<string | null>(null);
     const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-    const [parsedPreview, setParsedPreview] = useState<{ name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null>(null);
+    const [parsedPreview, setParsedPreview] = useState<ParsedResume | null>(null);
     const [parseError, setParseError] = useState<string | null>(null);
 
     // Appearance settings (preview-only until Save Revision)
@@ -1180,8 +1180,8 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
       }
   };
 
-  async function applyParsedData(passedParsed?: { name?: string; email?: string; phone?: string; summary?: string; skillsText?: string } | null) {
-      const parsed = passedParsed || parsedPreview;
+  async function applyParsedData(passedParsed?: ParsedResume | null) {
+      const parsed: ParsedResume | null = passedParsed || parsedPreview;
       if (!parsed) return;
             // Prevent repeated auto-applies: if a parsed revision already exists, skip.
             const hasParsedRevision = Array.isArray(resumeData.revisions) && resumeData.revisions.some((r: any) => {

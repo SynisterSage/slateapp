@@ -11,6 +11,8 @@
     "build:css": "tailwindcss -i ./src/index.css -o ./dist/tailwind.css --minify"
   },
   "dependencies": {
+    "react-markdown": "^8.0.7",
+    "remark-gfm": "^3.0.1",
     "@supabase/supabase-js": "^2.86.0",
     "date-fns": "^2.30.0",
     "framer-motion": "^12.23.24",

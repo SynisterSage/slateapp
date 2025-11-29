@@ -10,6 +10,13 @@ import { Jobs } from './pages/Jobs';
 import { Applications } from './pages/Applications';
 import { Settings } from './pages/Settings';
 import { Login } from './pages/Login';
+import Support from './pages/Support';
+import WhatsNew from './pages/WhatsNew';
+import Docs from './pages/Docs';
+import Guides from './pages/Guides';
+import Legal from './pages/Legal';
+import SearchResults from './pages/SearchResults';
+import ApiDocs from './pages/ApiDocs';
 import { Loader } from './components/Loader';
 import { AppView } from './types';
 import supabase, { supabaseSession } from './src/lib/supabaseClient';
@@ -127,6 +134,12 @@ const App = () => {
       case AppView.JOBS: return '/jobs';
       case AppView.APPLICATIONS: return '/applications';
       case AppView.SETTINGS: return '/settings';
+      case AppView.SUPPORT: return '/support';
+      case AppView.DOCS: return '/docs';
+      case AppView.GUIDES: return '/guides';
+      case AppView.WHATS_NEW: return '/whats-new';
+      case AppView.API_DOCS: return '/api-docs';
+      case AppView.LEGAL: return '/legal';
       default: return '/';
     }
   };
@@ -137,6 +150,13 @@ const App = () => {
     if (path.startsWith('/jobs')) return AppView.JOBS;
     if (path.startsWith('/applications')) return AppView.APPLICATIONS;
     if (path.startsWith('/settings')) return AppView.SETTINGS;
+    if (path.startsWith('/support')) return AppView.SUPPORT;
+    if (path.startsWith('/docs')) return AppView.DOCS;
+    if (path.startsWith('/guides')) return AppView.GUIDES;
+    if (path.startsWith('/whats-new')) return AppView.WHATS_NEW;
+    if (path.startsWith('/api-docs')) return AppView.API_DOCS;
+    if (path.startsWith('/search')) return AppView.SEARCH;
+    if (path.startsWith('/legal')) return AppView.LEGAL;
     return AppView.DASHBOARD;
   };
 
@@ -153,6 +173,65 @@ const App = () => {
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  // Support programmatic app-level navigation/open events from TopNav / SearchResults
+  useEffect(() => {
+    const onAppNavigate = (e: any) => {
+      try {
+        const v = e && e.detail && e.detail.view;
+        if (!v) return;
+        // v is expected to be a key of AppView (string name)
+        const viewKey = String(v).toUpperCase();
+        if ((AppView as any)[viewKey]) {
+          handleNavigate((AppView as any)[viewKey]);
+        }
+      } catch (err) {}
+    };
+
+    const onOpenResume = (e: any) => {
+      try {
+        const id = e && e.detail && e.detail.id;
+        if (!id) return;
+        setSelectedResumeId(id);
+        handleNavigate(AppView.RESUME_DETAIL);
+      } catch (err) {}
+    };
+
+    const onOpenApplication = (e: any) => {
+      try {
+        const id = e && e.detail && e.detail.id;
+        if (!id) return;
+        // Navigate to Applications view; Applications component can listen for a secondary event
+        handleNavigate(AppView.APPLICATIONS);
+        // Also re-dispatch a selection event so Applications can act on it
+        try { window.dispatchEvent(new CustomEvent('app:selectApplication', { detail: { id } })); } catch (err) {}
+      } catch (err) {}
+    };
+
+    const onOpenGuideOrDoc = (e: any) => {
+      try {
+        const id = e && e.detail && (e.detail.id || e.detail.slug);
+        if (!id) return;
+        // Prefer Guides if a guide id was supplied; docs will be handled by Docs component listening to its event
+        if (e.type === 'app:openGuide') handleNavigate(AppView.GUIDES);
+        if (e.type === 'app:openDoc') handleNavigate(AppView.DOCS);
+      } catch (err) {}
+    };
+
+    window.addEventListener('app:navigate', onAppNavigate as EventListener);
+    window.addEventListener('app:openResume', onOpenResume as EventListener);
+    window.addEventListener('app:openApplication', onOpenApplication as EventListener);
+    window.addEventListener('app:openGuide', onOpenGuideOrDoc as EventListener);
+    window.addEventListener('app:openDoc', onOpenGuideOrDoc as EventListener);
+
+    return () => {
+      window.removeEventListener('app:navigate', onAppNavigate as EventListener);
+      window.removeEventListener('app:openResume', onOpenResume as EventListener);
+      window.removeEventListener('app:openApplication', onOpenApplication as EventListener);
+      window.removeEventListener('app:openGuide', onOpenGuideOrDoc as EventListener);
+      window.removeEventListener('app:openDoc', onOpenGuideOrDoc as EventListener);
+    };
   }, []);
 
   const handleLogin = () => {
@@ -225,6 +304,20 @@ const App = () => {
         return <Applications />;
       case AppView.SETTINGS:
         return <Settings currentTheme={theme} onToggleTheme={toggleTheme} onLogout={handleLogout} />;
+      case AppView.SUPPORT:
+        return <Support />;
+      case AppView.DOCS:
+        return <Docs />;
+      case AppView.GUIDES:
+        return <Guides />;
+      case AppView.SEARCH:
+        return <SearchResults />;
+      case AppView.WHATS_NEW:
+        return <WhatsNew />;
+      case AppView.API_DOCS:
+        return <ApiDocs />;
+      case AppView.LEGAL:
+        return <Legal />;
       default:
         return <Dashboard onNavigate={handleNavigate} onQuickApply={handleQuickApplyFromDashboard} />;
     }

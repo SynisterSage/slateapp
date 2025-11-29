@@ -5,6 +5,13 @@ export enum AppView {
   JOBS = 'JOBS',
   APPLICATIONS = 'APPLICATIONS',
   SETTINGS = 'SETTINGS',
+  SUPPORT = 'SUPPORT',
+  DOCS = 'DOCS',
+  GUIDES = 'GUIDES',
+  WHATS_NEW = 'WHATS_NEW',
+  API_DOCS = 'API_DOCS',
+  LEGAL = 'LEGAL',
+  SEARCH = 'SEARCH',
   RESUME_DETAIL = 'RESUME_DETAIL'
 }
 
@@ -62,6 +69,28 @@ export interface PersonalInfo {
   summary: string;
 }
 
+// Parsed resume shape produced by parsers / AI. Keep permissive to
+// allow different providers to include different fields.
+export interface ParsedResume {
+  name?: string;
+  fullName?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  website?: string;
+  location?: string;
+  summary?: string;
+  text?: string; // full extracted text
+  skillsText?: string;
+  skills?: Array<{ name?: string; level?: string }> | string[];
+  experience?: any[];
+  education?: any[];
+  languages?: any[];
+  interests?: any[];
+  [key: string]: any;
+}
+
 export interface ResumeRevision {
   id: string;
   name: string;
@@ -69,18 +98,22 @@ export interface ResumeRevision {
   score?: number;
   tags: string[];
   contentSummary: string;
+  // Parsed representation produced by the resume parser (optional)
+  parsed?: ParsedResume | any;
 }
 
 export interface AnalysisIssue {
   id: string;
-  severity: 'critical' | 'warning' | 'info';
-  category: 'impact' | 'brevity' | 'style' | 'ats';
+  // allow common severities used across AI heuristics
+  severity: 'critical' | 'major' | 'minor' | 'warning' | 'info' | string;
+  // category can be arbitrary (e.g., 'contact', 'bullets', 'skills', 'reverseChron')
+  category: string;
   title: string;
   description: string;
   suggestion?: string;
   // For mock interaction: what field does this fix update?
   fixAction?: {
-    targetSection: 'experience' | 'summary';
+    targetSection: 'experience' | 'summary' | 'skills' | 'languages' | 'interests' | 'personalInfo' | string;
     targetId?: string; // if experience
     newContent: string | string[]; // The content to replace/append
   };
@@ -88,13 +121,12 @@ export interface AnalysisIssue {
 
 export interface ResumeAnalysis {
   overallScore: number;
-  categories: {
-    impact: number;
-    brevity: number;
-    style: number;
-    ats: number;
-  };
+  // categories may be absent or partially populated depending on the analysis
+  // flexible mapping of category name -> score (0-100)
+  categories?: Record<string, number>;
   issues: AnalysisIssue[];
+  // rawOutput can hold AI/provider debug output
+  rawOutput?: any;
 }
 
 export interface Resume {
@@ -128,6 +160,13 @@ export interface Job {
   status?: 'New' | 'Applied' | 'Interviewing' | 'Offer';
   tags?: string[];
   sourceUrl?: string;
+  // Provider-specific aliases and raw payload for robustness
+  url?: string;
+  apply_url?: string;
+  link?: string;
+  contact_name?: string;
+  contract_time?: string;
+  raw?: any;
   // Optional, parsed fields extracted from HTML descriptions
   responsibilities?: string[];
   requirements?: string[];

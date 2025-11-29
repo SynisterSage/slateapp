@@ -179,6 +179,14 @@ const server = http.createServer(async (req, res) => {
       } else if (parsed.pathname === '/api/check-gmail') {
         const handler = (await import('../api/check-gmail.js')).default || (await import('../api/check-gmail.js'));
         await handler(fakeReq, fakeRes);
+        } else if (parsed.pathname === '/api/support') {
+          try {
+            const handler = (await import('../api/support.js')).default || (await import('../api/support.js'));
+            await handler(fakeReq, fakeRes);
+          } catch (e) {
+            console.error('dev-server: routing /api/support failed', e);
+            fakeRes.status(500).json({ error: String(e) });
+          }
         } else if (parsed.pathname === '/api/internal/notify') {
           // Internal notify endpoint used by server-side processes to create notifications
           try {
