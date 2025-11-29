@@ -29,6 +29,7 @@ export const TopNav: React.FC<TopNavProps> = ({
   onNavigate
 }) => {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchWrapperRef = useRef<HTMLDivElement | null>(null);
   const [activeDropdown, setActiveDropdown] = useState<'notifications' | 'help' | 'profile' | null>(null);
   const { notifications, unreadCount, addNotification } = useNotifications();
   const [query, setQuery] = useState('');
@@ -65,6 +66,25 @@ export const TopNav: React.FC<TopNavProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // Close suggestions when clicking outside the search wrapper
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      try {
+        if (!searchWrapperRef.current) return;
+        const target = e.target as Node;
+        if (searchWrapperRef.current.contains(target)) return;
+        setShowSuggest(false);
+      } catch (err) {}
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  // When other dropdowns open, hide suggestions to avoid overlap
+  useEffect(() => {
+    if (activeDropdown) setShowSuggest(false);
+  }, [activeDropdown]);
 
   // Debounced suggestions
   useEffect(() => {
@@ -215,7 +235,7 @@ export const TopNav: React.FC<TopNavProps> = ({
           </div>
 
           {/* Global Search Bar */}
-          <div className="hidden md:block relative max-w-sm w-full group z-10">
+          <div ref={searchWrapperRef} className="hidden md:block relative max-w-sm w-full group z-10">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-hover:text-purple-500 transition-colors" />
               <input 
                   ref={searchInputRef}
