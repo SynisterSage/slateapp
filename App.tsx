@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Navigation } from './components/Navigation';
 import { TopNav } from './components/TopNav';
+import { NotificationProvider } from './src/lib/notificationStore';
 import { Dashboard } from './pages/Dashboard';
 import { Resumes } from './pages/Resumes';
 import { ResumeDetail } from './pages/ResumeDetail';
@@ -88,6 +89,21 @@ const App = () => {
       try { sessionListener?.subscription?.unsubscribe?.(); } catch (e) {}
     };
   }, []);
+
+  // Expose current user id to window for dev PoC WS connection
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!isAuthenticated) return;
+        const { data } = await supabase.auth.getUser();
+        if (data && data.user && data.user.id) {
+          (window as any).__USER_ID = data.user.id;
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
+  }, [isAuthenticated]);
 
   // Handle Theme Change
   useEffect(() => {
@@ -220,8 +236,9 @@ const App = () => {
 
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950 transition-colors duration-300 font-sans overflow-hidden">
-       {isAuthenticated ? (
+         {isAuthenticated ? (
            <>
+           <NotificationProvider>
               <Navigation 
                   currentView={currentView} 
                   onNavigate={handleNavigate} 
@@ -245,7 +262,8 @@ const App = () => {
                        {renderContent()}
                   </main>
               </div>
-           </>
+                </NotificationProvider>
+              </>
        ) : (
           <Login onLogin={handleLogin} />
        )}

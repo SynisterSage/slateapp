@@ -3,6 +3,27 @@
 
 // Use global fetch available in Node 18+, no node-fetch dependency required
 import { randomUUID } from 'crypto';
+
+async function sendNotify(ownerId, payload) {
+  try {
+    const devPort = process.env.DEV_SERVER_PORT || process.env.PORT || '3001';
+    const base = process.env.DEV_SERVER_BASE || process.env.VITE_DEV_SERVER_BASE || `http://localhost:${devPort}`;
+    const url = `${base.replace(/\/$/, '')}/api/internal/notify`;
+    const key = process.env.INTERNAL_API_KEY;
+    if (!key) {
+      console.warn('sendNotify: INTERNAL_API_KEY not set, skipping notify');
+      return;
+    }
+    const body = { ...payload, userId: ownerId };
+    await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    console.warn('sendNotify failed', e);
+  }
+}
 async function getAccessTokenRow(ownerId) {
   // Use Supabase REST with service role to fetch oauth_providers for owner
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -233,6 +254,16 @@ export default async function handler(req, res) {
                   headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
                   body: JSON.stringify({ id: randomUUID(), application_id: app.id, owner: owner, type: 'status_change', payload: { from: app.status, to: newStatus, detected_from: 'email_thread' }, created_at: new Date().toISOString() })
                 });
+                try {
+                  await sendNotify(owner, {
+                    type: 'application_status_change',
+                    priority: 'important',
+                    title: 'Application status updated',
+                    message: `Your application${app.job_title ? ' for ' + app.job_title : ''} is now ${newStatus}`,
+                    url: `/applications/${app.id}`,
+                    payload: { applicationId: app.id, from: app.status, to: newStatus }
+                  });
+                } catch (e) { console.warn('notify failed after thread status change', e); }
               } catch (e) {
                 console.warn('sync-gmail: failed to update app status from thread message', e);
               }
@@ -443,6 +474,16 @@ export default async function handler(req, res) {
                 headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
                 body: JSON.stringify(eventRowStatus)
               });
+            try {
+              await sendNotify(owner, {
+                type: 'application_status_change',
+                priority: 'important',
+                title: 'Application status updated',
+                message: `Your application${matchedApp && matchedApp.job_title ? ' for ' + matchedApp.job_title : ''} is now ${newStatus}`,
+                url: `/applications/${matchedApp.id}`,
+                payload: { applicationId: matchedApp.id, from: matchedApp.status, to: newStatus }
+              });
+            } catch (e) { console.warn('notify failed after matchedApp status change', e); }
           }
         } else {
           // No match: create a generic event referencing the email only

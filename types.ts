@@ -149,3 +149,24 @@ export interface Application {
   notes: string;
   lastActivity?: string;
 }
+
+export type NotificationPriority = 'info' | 'important' | 'critical';
+
+export interface NotificationPayload {
+  // free-form JSON payload for richer actions (e.g., {emailId, jobId, resumeId})
+  [key: string]: any;
+}
+
+export interface Notification {
+  id: string; // uuid
+  userId?: string; // recipient user id
+  type: string; // e.g., 'resume_parsed', 'application_submitted', 'new_message'
+  priority: NotificationPriority;
+  title: string;
+  message: string;
+  url?: string; // optional deep link in the app
+  payload?: NotificationPayload;
+  isRead?: boolean;
+  createdAt: string;
+  expiresAt?: string;
+}

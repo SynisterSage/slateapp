@@ -39,7 +39,7 @@ export const Navigation: React.FC<NavigationProps> = ({
       <div className={`h-16 flex items-center border-b border-white/10 transition-all duration-300 ${isCollapsed ? 'justify-center px-0' : 'px-6 gap-3'}`}>
         <div className="w-8 h-8 bg-gradient-to-br from-purple-600 to-indigo-600 rounded-lg flex items-center justify-center font-bold text-lg text-white shrink-0 shadow-lg shadow-purple-900/50 ring-1 ring-white/10">S</div>
         <span className={`text-lg font-bold text-white tracking-tight overflow-hidden whitespace-nowrap transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
-          SlateApp
+          Slate
         </span>
       </div>
 

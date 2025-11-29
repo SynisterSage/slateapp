@@ -172,6 +172,46 @@ export default async function handler(req, res) {
 
     if (!parsed) return res.status(502).json({ error: 'Failed to parse JSON from Hugging Face response', raw: content });
 
+    // If caller provided a userId, persist a notification for this analysis (dev-mode helper)
+    try {
+      const userId = (body && body.userId) ? body.userId : null;
+      const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+      const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+      const WS_BROADCAST_URL = process.env.NOTIFY_WS_URL || 'http://localhost:3002/broadcast';
+      if (userId && SUPABASE_URL && SUPABASE_SERVICE_ROLE) {
+        const title = `Resume scored: ${parsed.overallScore ?? 'N/A'}`;
+        const message = `Your resume analysis returned a score of ${parsed.overallScore ?? 'N/A'}`;
+        // Insert notification into Supabase notifications table (REST)
+        try {
+          await fetch(`${SUPABASE_URL}/rest/v1/notifications`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+              apikey: SUPABASE_SERVICE_ROLE,
+              'Content-Type': 'application/json',
+              Prefer: 'return=representation'
+            },
+            body: JSON.stringify([{ user_id: userId, type: 'resume_analysis', priority: 'important', title, message, payload: parsed }])
+          });
+        } catch (e) {
+          console.warn('Failed to persist notification in Supabase', e && e.message);
+        }
+
+        // Forward to WS broadcast so connected clients see it immediately (best-effort)
+        try {
+          await fetch(WS_BROADCAST_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, notification: { id: `analyze-${Date.now()}`, type: 'resume_analysis', priority: 'important', title, message, payload: parsed, createdAt: new Date().toISOString() } })
+          });
+        } catch (e) {
+          console.warn('Failed to forward analysis notification to WS', e && e.message);
+        }
+      }
+    } catch (e) {
+      console.warn('Notification persistence step failed', e && e.message);
+    }
+
     return res.status(200).json(parsed);
   } catch (err) {
     console.error('analyze handler error', err);

@@ -179,9 +179,37 @@ const server = http.createServer(async (req, res) => {
       } else if (parsed.pathname === '/api/check-gmail') {
         const handler = (await import('../api/check-gmail.js')).default || (await import('../api/check-gmail.js'));
         await handler(fakeReq, fakeRes);
-      } else if (parsed.pathname === '/api/list-gmail-accounts') {
+        } else if (parsed.pathname === '/api/internal/notify') {
+          // Internal notify endpoint used by server-side processes to create notifications
+          try {
+            const handler = (await import('../api/internal/notify.js')).default || (await import('../api/internal/notify.js'));
+            await handler(fakeReq, fakeRes);
+          } catch (e) {
+            console.error('dev-server: routing /api/internal/notify failed', e);
+            fakeRes.status(500).json({ error: String(e) });
+          }
+        } else if (parsed.pathname === '/api/list-gmail-accounts') {
         const handler = (await import('../api/list-gmail-accounts.js')).default || (await import('../api/list-gmail-accounts.js'));
         await handler(fakeReq, fakeRes);
+        } else if (parsed.pathname === '/api/notifications') {
+          try {
+            const handler = (await import('../api/notifications.js')).default || (await import('../api/notifications.js'));
+            // attach parsed.query
+            try { fakeReq.query = parsed.query; fakeReq.path = parsed.pathname; } catch (e) {}
+            await handler(fakeReq, fakeRes);
+          } catch (e) {
+            console.error('dev-server: routing /api/notifications failed', e);
+            fakeRes.status(500).json({ error: String(e) });
+          }
+        } else if (parsed.pathname && parsed.pathname.startsWith('/api/notifications/')) {
+          try {
+            const handler = (await import('../api/notifications.js')).default || (await import('../api/notifications.js'));
+            try { fakeReq.query = parsed.query; fakeReq.path = parsed.pathname; } catch (e) {}
+            await handler(fakeReq, fakeRes);
+          } catch (e) {
+            console.error('dev-server: routing /api/notifications/:id failed', e);
+            fakeRes.status(500).json({ error: String(e) });
+          }
       } else if (parsed.pathname === '/api/extract-job-emails') {
         try {
           const handler = (await import('../api/extract-job-emails.js')).default || (await import('../api/extract-job-emails.js'));

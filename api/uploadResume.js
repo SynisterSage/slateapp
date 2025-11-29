@@ -823,6 +823,44 @@ export default async function handler(req, res) {
                   // return parsed result even if we couldn't persist the revision
                   return res.status(200).json({ success: true, path, parsed: parsedRevision.parsed });
                 }
+                // After persisting the parsed revision, create a notification for the owner (best-effort)
+                try {
+                  const notifyUser = owner || (finalUpsert && finalUpsert.owner) || null;
+                  if (notifyUser) {
+                    try {
+                      // Insert notification row using service role
+                      const notifRow = {
+                        user_id: notifyUser,
+                        type: 'resume_parsed',
+                        priority: 'important',
+                        title: 'Resume processed',
+                        message: 'We parsed your resume and extracted contact info and skills',
+                        url: `/resumes/${encodeURIComponent(String(resumeId))}`,
+                        payload: { resumeId }
+                      };
+                      try {
+                        await serverClient.from('notifications').insert(notifRow);
+                      } catch (e) {
+                        console.warn('uploadResume: failed to insert notification row', e && e.message);
+                      }
+
+                      // Forward to WS broadcast so connected clients see it immediately (best-effort)
+                      try {
+                        const WS_BROADCAST_URL = process.env.NOTIFY_WS_URL || 'http://localhost:3002/broadcast';
+                        await fetch(WS_BROADCAST_URL, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ userId: notifyUser, notification: { id: `upload-${Date.now()}`, type: 'resume_parsed', priority: 'important', title: notifRow.title, message: notifRow.message, url: notifRow.url, payload: notifRow.payload, createdAt: new Date().toISOString() } })
+                        });
+                      } catch (e) {
+                        console.warn('uploadResume: failed to forward notification to WS', e && e.message);
+                      }
+                    } catch (e) {
+                      console.warn('uploadResume: notification step failed', e && e.message);
+                    }
+                  }
+                } catch (notifyOuterErr) { console.warn('uploadResume: notify outer error', notifyOuterErr); }
+
                 // return parsed result and the final persisted row in response
                 return res.status(200).json({ success: true, path, parsed: parsedRevision.parsed, row: finalUpsert });
               } catch (revUpsertErr) {

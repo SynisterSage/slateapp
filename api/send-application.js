@@ -1,5 +1,26 @@
 import { randomUUID } from 'crypto';
 
+async function sendNotify(ownerId, payload) {
+  try {
+    const devPort = process.env.DEV_SERVER_PORT || process.env.PORT || '3001';
+    const base = process.env.DEV_SERVER_BASE || process.env.VITE_DEV_SERVER_BASE || `http://localhost:${devPort}`;
+    const url = `${base.replace(/\/$/, '')}/api/internal/notify`;
+    const key = process.env.INTERNAL_API_KEY;
+    if (!key) {
+      console.warn('sendNotify: INTERNAL_API_KEY not set, skipping notify');
+      return;
+    }
+    const body = { ...payload, userId: ownerId };
+    await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    console.warn('sendNotify failed', e);
+  }
+}
+
 // Server endpoint: send an application email using a connected Gmail account
 // Expects POST JSON: { job, resumeId, senderAccountId, subject, bodyHtml, toEmail }
 // Uses Supabase REST with service role to fetch oauth_providers and resumes, refresh tokens,
@@ -324,6 +345,17 @@ export default async function handler(req, res) {
             headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`, apikey: SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=representation' },
             body: JSON.stringify(eventRow)
           });
+          try {
+            const notifyOwner = owner || row.owner || null;
+            await sendNotify(notifyOwner, {
+              type: 'application_sent',
+              priority: 'info',
+              title: 'Application sent',
+              message: `Your application${job && job.title ? ' for ' + job.title : ''} was sent successfully.`,
+              url: `/applications/${appId}`,
+              payload: { applicationId: appId, messageId: sentJson.id }
+            });
+          } catch (e) { console.warn('send-application: notify failed', e); }
         } catch (e) {
           console.warn('send-application: failed to persist application_event', e);
         }

@@ -686,7 +686,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
             setAnalyzeCooldown(true);
             setTimeout(() => setAnalyzeCooldown(false), 8000);
             // Try server-side analyze endpoint first
-            const payload = { id: resumeData.id, data: resumeData };
+            const payload = { id: resumeData.id, data: resumeData, userId: (window as any).__USER_ID || null };
             let json: any = null;
             let rawText: string | null = null;
             try {
@@ -1143,7 +1143,7 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               summary: sanitizeSummary(fullText).slice(0, 2000),
               skillsText
           };
-          setParsedPreview(parsedObj);
+            setParsedPreview(parsedObj);
                 // Immediately reflect parsed data in the preview (in-memory only).
           setResumeData(prev => {
               const newData = { ...prev } as any;
@@ -1159,6 +1159,17 @@ export const ResumeDetail: React.FC<ResumeDetailProps> = ({ resumeId, onBack }) 
               }
               return newData;
           });
+                    // Optionally notify backend that a resume was parsed (dev-friendly)
+                    try {
+                        const userId = (window as any).__USER_ID || null;
+                        if (userId) {
+                            fetch('/api/notifications/create', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ userId, type: 'resume_parsed', priority: 'important', title: 'Resume processed', message: 'We parsed your resume and extracted contact info and skills', url: `/resumes/${encodeURIComponent(String(resumeData.id))}`, payload: { resumeId: resumeData.id } })
+                            }).catch(() => {});
+                        }
+                    } catch (e) {}
                             // Keep parsedPreview available for user to apply manually via the Editor.
       } catch (err: any) {
           console.error('PDF parse failed', err);

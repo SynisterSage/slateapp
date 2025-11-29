@@ -1,11 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Search, Bell, Moon, Sun, 
   ChevronRight, HelpCircle, LogOut, 
   Settings, CreditCard, FileText,
-  MessageSquare, BookOpen, Zap, User
+  MessageSquare, BookOpen, Zap
 } from 'lucide-react';
 import { AppView } from '../types';
+import { NotificationCenter } from './NotificationCenter';
+import { useNotifications } from '../src/lib/notificationStore';
+import { connectNotifications, onNotification } from '../src/lib/notifications';
 
 interface TopNavProps {
   currentView: AppView;
@@ -24,6 +27,15 @@ export const TopNav: React.FC<TopNavProps> = ({
   onNavigate
 }) => {
   const [activeDropdown, setActiveDropdown] = useState<'notifications' | 'help' | 'profile' | null>(null);
+  const { notifications, unreadCount, addNotification } = useNotifications();
+
+  // connect WS for notifications once (dev PoC expects userId available globally on window.__USER_ID)
+  useEffect(() => {
+    const userId = (window as any).__USER_ID || null;
+    if (userId) connectNotifications((window as any).NOTIFY_WS_URL || 'ws://localhost:3002', userId);
+    const off = onNotification((n) => addNotification(n as any));
+    return () => off();
+  }, [addNotification]);
 
   const toggleDropdown = (name: 'notifications' | 'help' | 'profile') => {
     setActiveDropdown(activeDropdown === name ? null : name);
@@ -46,11 +58,6 @@ export const TopNav: React.FC<TopNavProps> = ({
 
   const breadcrumbs = getBreadcrumb().split(' / ');
 
-  const notifications = [
-    { id: 1, title: 'New Job Match', desc: 'Senior React Dev at TechFlow', time: '2m ago', icon: Zap, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
-    { id: 2, title: 'Application Viewed', desc: 'DataSphere viewed your application', time: '1h ago', icon: FileText, color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-900/20' },
-    { id: 3, title: 'Resume Score Improved', desc: 'Your "Senior Dev" resume is now 92%', time: '3h ago', icon: User, color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
-  ];
 
   return (
     <>
@@ -110,32 +117,14 @@ export const TopNav: React.FC<TopNavProps> = ({
                 className={`p-2 rounded-lg transition-all ${activeDropdown === 'notifications' ? 'bg-purple-50 text-purple-600 dark:bg-purple-900/20 dark:text-purple-400' : 'text-gray-500 dark:text-gray-400 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20'}`}
               >
                   <Bell size={18} />
-                  <span className="absolute top-2 right-2.5 w-2 h-2 bg-rose-500 rounded-full border-2 border-white dark:border-gray-900"></span>
+                  {unreadCount > 0 && (
+                    <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-gray-900 animate-pulse"></span>
+                  )}
               </button>
 
               {activeDropdown === 'notifications' && (
-                <div className="absolute right-0 top-full mt-2 w-80 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden animate-in fade-in zoom-in-95 duration-200 backdrop-blur-sm">
-                  <div className="p-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center">
-                    <h3 className="font-bold text-gray-900 dark:text-white">Notifications</h3>
-                    <button className="text-xs text-purple-600 dark:text-purple-400 hover:underline">Mark all read</button>
-                  </div>
-                  <div className="max-h-[300px] overflow-y-auto">
-                    {notifications.map(n => (
-                      <div key={n.id} className="p-4 border-b border-gray-50 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors cursor-pointer flex gap-3">
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${n.bg} ${n.color}`}>
-                          <n.icon size={18} />
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">{n.title}</p>
-                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{n.desc}</p>
-                          <p className="text-[10px] text-gray-400 mt-1">{n.time}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <button className="w-full py-2.5 text-sm text-center text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition-colors">
-                    View All
-                  </button>
+                <div className="absolute right-0 top-full mt-2 w-96 p-2">
+                  <NotificationCenter onClose={() => setActiveDropdown(null)} />
                 </div>
               )}
           </div>

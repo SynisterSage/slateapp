@@ -4,7 +4,7 @@ import normalizeJob from '../lib/normalizeJob';
 // Simple API wrappers. Replace/mock as needed while backend evolves.
 
 const ENV = (import.meta as any) || {};
-const REMOTIVE_BASE = ENV.REMOTIVE_API_BASE || 'https://remotive.io/api/remote-jobs';
+const REMOTIVE_BASE = ENV.REMOTIVE_API_BASE || 'https://remotive.com/api/remote-jobs';
 const MUSE_BASE = ENV.VITE_MUSE_BASE || 'https://www.themuse.com/api/public/jobs';
 const MUSE_KEY = ENV.VITE_MUSE_API_KEY;
 const ADZUNA_ID = ENV.VITE_ADZUNA_APP_ID;
@@ -443,6 +443,48 @@ export async function createApplication(payload: any) {
   const { data, error } = await supabase.from('applications').insert(normalized).select().single();
   if (error) throw error;
   return data;
+}
+
+// Saved jobs (bookmarks)
+export async function getSavedJobs() {
+  try {
+    const { data, error } = await supabase.from('saved_jobs').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.warn('getSavedJobs failed', err);
+    return [];
+  }
+}
+
+export async function saveJob(job: any) {
+  try {
+    // attempt to include owner if available
+    try {
+      const u = await supabase.auth.getUser();
+      const user = u && (u as any).data ? (u as any).data.user : null;
+      if (user && user.id) job.owner = user.id;
+    } catch (e) {}
+
+    const payload = { job_id: job.id || job.job_id || null, payload: job };
+    const { data, error } = await supabase.from('saved_jobs').upsert(payload).select().single();
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.error('saveJob failed', err);
+    throw err;
+  }
+}
+
+export async function deleteSavedJob(jobId: string) {
+  try {
+    const { data, error } = await supabase.from('saved_jobs').delete().eq('job_id', jobId).select();
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.error('deleteSavedJob failed', err);
+    throw err;
+  }
 }
 
 export async function updateApplication(id: string, payload: any) {

@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
     Search, MapPin, DollarSign, Filter, ExternalLink, 
     LayoutGrid, List, Clock, Bookmark, CheckCircle2, X, 
@@ -7,7 +7,7 @@ import {
     FileText, ChevronDown, Frown
 } from 'lucide-react';
 // Jobs and resumes now come from providers and Supabase
-import { searchJobs as apiSearchJobs, getResumes, createApplication } from '../src/api';
+import { searchJobs as apiSearchJobs, getResumes, createApplication, getSavedJobs, saveJob, deleteSavedJob } from '../src/api';
 import supabase from '../src/lib/supabaseClient';
 import { Job } from '../types';
 import computeMatchScore from '../src/lib/matchJob';
@@ -32,6 +32,10 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
     const [isFilterOpen, setIsFilterOpen] = useState(false);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isScanning, setIsScanning] = useState(false);
+    // Infinite scroll: how many items to show from rankedJobs
+    const [itemsToShow, setItemsToShow] = useState<number>(12);
+    const listContainerRef = useRef<HTMLDivElement | null>(null);
+    const isLoadingMoreRef = useRef(false);
     const [savedJobIds, setSavedJobIds] = useState<Set<string>>(new Set());
     const [resumes, setResumes] = useState<any[]>([]);
 
@@ -139,6 +143,59 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [searchTerm]);
 
+    // Reset itemsToShow when jobs change (new search results)
+    useEffect(() => {
+        setItemsToShow(12);
+    }, [jobs]);
+
+    // Load persisted saved jobs on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const rows: any[] = await getSavedJobs();
+                const ids = new Set<string>();
+                for (const r of rows || []) {
+                    const id = r && (r.job_id || (r.payload && (r.payload.id || r.payload.job_id)) || r.id);
+                    if (id) ids.add(String(id));
+                }
+                setSavedJobIds(ids);
+            } catch (err) {
+                console.warn('Failed to load saved jobs', err);
+            }
+        })();
+    }, []);
+
+    // If the Jobs page was opened with a query param `openJob`, select that job when available
+    useEffect(() => {
+        try {
+            const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+            const openJobId = params ? params.get('openJob') : null;
+            if (!openJobId) return;
+            // If the job is already in our jobs list, select it
+            const found = jobs.find(j => String(j.id) === String(openJobId));
+            if (found) {
+                setSelectedJob(found);
+                return;
+            }
+            // Otherwise, attempt to resolve it from saved jobs stored in Supabase
+            (async () => {
+                try {
+                    const rows: any[] = await getSavedJobs();
+                    const match = (rows || []).find(r => String(r.job_id || (r.payload && (r.payload.id || r.payload.job_id)) || r.id) === String(openJobId));
+                    if (match) {
+                        const payload = match.payload || {};
+                        setSelectedJob(payload);
+                    }
+                } catch (e) {
+                    console.warn('Failed to resolve openJob from saved jobs', e);
+                }
+            })();
+        } catch (e) {}
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [jobs]);
+
+    
+
     // Initialize Apply Modal from prop if present
     useEffect(() => {
         if (initialApplyJobId) {
@@ -169,7 +226,10 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
         if (!showRemote && !showOnSite) matchesLocation = false;
 
         // 3. Match Score
-        const matchesScore = job.matchScore >= activeFilters.minMatchScore;
+        // Some providers (fallbacks like Remotive) don't include a server-side `matchScore`.
+        // Treat missing/undefined scores as 0 so they aren't accidentally filtered out when
+        // the minimum is 0 (default).
+        const matchesScore = (typeof job.matchScore === 'number' ? job.matchScore : 0) >= activeFilters.minMatchScore;
 
         // 4. Job Type (Mock assumption: All are Full-time unless specified)
         // Since MOCK data lacks strict 'type' field, we map 'Full-time' to standard jobs.
@@ -206,14 +266,90 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
             }
         })() })).sort((a,b) => (b.matchScore || 0) - (a.matchScore || 0));
 
+    // Helper: normalize / format postedAt values into readable text
+    const formatPostedAt = (postedAt: any) => {
+        if (!postedAt) return '';
+        try {
+            const maybe = String(postedAt || '').trim();
+            const parsed = Date.parse(maybe);
+            if (!isNaN(parsed)) {
+                const d = new Date(parsed);
+                const now = Date.now();
+                const diff = now - d.getTime();
+                if (diff < 60 * 1000) return 'just now';
+                if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}m ago`;
+                if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)}h ago`;
+                // include time for recent posts (within 30 days)
+                const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+                if (diff < THIRTY_DAYS) {
+                    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+                }
+                // older than 30 days: show short date; include year when not current year
+                const opts: any = { month: 'short', day: 'numeric' };
+                if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+                return d.toLocaleDateString(undefined, opts);
+            }
+        } catch (e) {}
+        return String(postedAt);
+    };
+
+    // Scroll handler: when near bottom, increase itemsToShow
+    useEffect(() => {
+        const el = listContainerRef.current;
+        if (!el) return;
+        const onScroll = () => {
+            if (isLoadingJobs) return;
+            try {
+                const threshold = 300; // px from bottom to trigger
+                if (el.scrollHeight - el.scrollTop - el.clientHeight < threshold) {
+                    if (isLoadingMoreRef.current) return;
+                    // If we already show all items, do nothing
+                    if (itemsToShow >= rankedJobs.length) return;
+                    isLoadingMoreRef.current = true;
+                    // Simulate loading delay for UX
+                    setTimeout(() => {
+                        setItemsToShow(prev => Math.min(prev + 12, rankedJobs.length));
+                        isLoadingMoreRef.current = false;
+                    }, 250);
+                }
+            } catch (e) {}
+        };
+        el.addEventListener('scroll', onScroll);
+        return () => el.removeEventListener('scroll', onScroll);
+    }, [rankedJobs, isLoadingJobs, itemsToShow]);
+
     // --- Actions ---
     
     const toggleSave = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        const newSaved = new Set(savedJobIds);
-        if (newSaved.has(id)) newSaved.delete(id);
-        else newSaved.add(id);
-        setSavedJobIds(newSaved);
+        (async () => {
+            try {
+                const isSaved = savedJobIds.has(id);
+                if (isSaved) {
+                    // remove persisted saved job
+                    await deleteSavedJob(id);
+                    const newSaved = new Set(savedJobIds);
+                    newSaved.delete(id);
+                    setSavedJobIds(newSaved);
+                } else {
+                    // find job payload
+                    const job = jobs.find(j => j.id === id) || null;
+                    if (!job) {
+                        // still update local state optimistically
+                        const newSaved = new Set(savedJobIds);
+                        newSaved.add(id);
+                        setSavedJobIds(newSaved);
+                        return;
+                    }
+                    await saveJob(job);
+                    const newSaved = new Set(savedJobIds);
+                    newSaved.add(id);
+                    setSavedJobIds(newSaved);
+                }
+            } catch (err) {
+                console.warn('toggleSave persist failed', err);
+            }
+        })();
     };
 
     const initiateApply = (e: React.MouseEvent, id: string) => {
@@ -874,7 +1010,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
             </div>
 
             {/* Job List */}
-             <div className="flex-1 overflow-y-auto min-h-0 pb-20">
+             <div ref={listContainerRef} className="flex-1 overflow-y-auto min-h-0 pb-20">
                 {isLoadingJobs ? (
                     <div className="flex flex-col items-center justify-center py-24 text-center">
                         <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-gray-800 flex items-center justify-center mb-4">
@@ -899,7 +1035,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                     </div>
                 ) : (
                     <div className={viewMode === 'card' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" : "flex flex-col gap-4"}>
-                        {rankedJobs.map(job => {
+                        {rankedJobs.slice(0, itemsToShow).map(job => {
                              const isSaved = savedJobIds.has(job.id);
                              const isApplied = job.status === 'Applied';
 
@@ -914,11 +1050,7 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                                 <div>
                                                     <h4 className="font-bold text-slate-900 dark:text-white text-lg leading-tight group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors line-clamp-1">{job.title}</h4>
                                                     <p className="text-sm text-slate-500 dark:text-gray-400 font-medium">{String(job.company || '')}</p>
-                                                    {job.source ? (
-                                                        <div className="mt-1">
-                                                            <span className="inline-block text-xs font-semibold bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded">{String(job.source).toUpperCase()}</span>
-                                                        </div>
-                                                    ) : null}
+                                                    
                                                 </div>
                                             </div>
                                         </div>
@@ -936,10 +1068,17 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                         </p>
 
                                         <div className="flex items-center justify-between mt-auto pt-4 border-t border-slate-100 dark:border-gray-700">
-                                            <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-bold text-xs">
-                                                <Sparkles size={12} /> {job.matchScore}% Match
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-bold text-xs">
+                                                    <Sparkles size={12} /> {job.matchScore}% Match
+                                                </div>
+                                                {job.source ? (
+                                                    <span className="inline-block text-xs font-semibold bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded">{String(job.source).toUpperCase()}</span>
+                                                ) : null}
                                             </div>
-                                            <span className="text-xs text-slate-400 dark:text-gray-500">{job.postedAt}</span>
+                                            <div className="flex items-center gap-3 text-xs text-slate-400 dark:text-gray-500">
+                                                <span>{formatPostedAt(job.postedAt)}</span>
+                                            </div>
                                         </div>
                                         
                                         {/* Hover Actions */}
@@ -963,10 +1102,12 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                          <div className="flex-1 min-w-0">
                                              <div className="flex justify-between items-start">
                                                  <h4 className="font-bold text-slate-900 dark:text-white text-base truncate group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">{job.title}</h4>
-                                                 <span className="text-xs text-slate-400 dark:text-gray-500 whitespace-nowrap">{job.postedAt}</span>
                                              </div>
                                             <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-gray-400 mt-0.5">
                                                  <span className="font-medium text-slate-700 dark:text-gray-300">{String(job.company || '')}</span>
+                                                 {job.source ? (
+                                                     <span className="ml-2 inline-block text-xs font-semibold bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded">{String(job.source).toUpperCase()}</span>
+                                                 ) : null}
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
                                                  <span>{job.location}</span>
                                                  <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-gray-600"></span>
@@ -975,23 +1116,36 @@ export const Jobs: React.FC<JobsProps> = ({ preselectedResumeId, initialApplyJob
                                                  <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1"><Sparkles size={10} /> {job.matchScore}% Match</span>
                                              </div>
                                          </div>
-                                         <div className="flex items-center gap-2">
-                                             <button 
-                                                onClick={(e) => toggleSave(e, job.id)}
-                                                className={`p-2 rounded-lg transition-colors ${isSaved ? 'text-amber-500 bg-amber-50 dark:bg-amber-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-gray-700'}`}
-                                             >
-                                                <Bookmark size={18} fill={isSaved ? "currentColor" : "none"} />
-                                             </button>
-                                             <button 
-                                                className="p-2 text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-slate-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                                             >
-                                                 <ChevronRight size={20} />
-                                             </button>
-                                         </div>
+                                                      <div className="flex items-center gap-2">
+                                                            <div className="flex flex-col items-center mr-2">
+                                                                 <span className="text-xs text-slate-400 dark:text-gray-500 whitespace-nowrap">{formatPostedAt(job.postedAt)}</span>
+                                                            </div>
+                                                            <button 
+                                                                onClick={(e) => toggleSave(e, job.id)}
+                                                                className={`p-2 rounded-lg transition-colors ${isSaved ? 'text-amber-500 bg-amber-50 dark:bg-amber-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-gray-700'}`}
+                                                            >
+                                                                <Bookmark size={18} fill={isSaved ? "currentColor" : "none"} />
+                                                            </button>
+                                                            <button 
+                                                                className="p-2 text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-slate-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                                                            >
+                                                                 <ChevronRight size={20} />
+                                                            </button>
+                                                      </div>
                                      </div>
                                  );
                              }
                         })}
+
+                        {/* Bottom loader / hint for infinite scroll */}
+                        {itemsToShow < rankedJobs.length && (
+                            <div className="w-full col-span-full flex items-center justify-center py-6">
+                                <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-gray-400">
+                                    <Loader2 className="animate-spin" size={16} />
+                                    Loading more jobs...
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

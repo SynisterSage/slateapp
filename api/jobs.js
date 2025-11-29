@@ -8,12 +8,15 @@ const LINKEDIN_TTL = 60 * 1000; // 60s
 const INDEED_TTL = 60 * 1000; // 60s
 const RISE_CACHE = new Map();
 const RISE_TTL = 60 * 1000; // 60s
+const JOBICY_CACHE = new Map();
+const JOBICY_TTL = 60 * 60 * 1000; // 1h
 
 export default async function handler(req, res) {
   const { query } = req;
   const q = query.q || query.search || '';
 
-  const REMOTIVE_BASE = process.env.REMOTIVE_API_BASE || 'https://remotive.io/api/remote-jobs';
+  const REMOTIVE_BASE = process.env.REMOTIVE_API_BASE || 'https://remotive.com/api/remote-jobs';
+  const JOBICY_BASE = process.env.JOBICY_API_BASE || 'https://jobicy.com/api/v2/remote-jobs';
   const MUSE_BASE = process.env.VITE_MUSE_BASE || 'https://www.themuse.com/api/public/jobs';
   const MUSE_KEY = process.env.VITE_MUSE_API_KEY;
   const ADZUNA_ID = process.env.VITE_ADZUNA_APP_ID;
@@ -32,7 +35,7 @@ export default async function handler(req, res) {
   // Helper to normalize job shape
   const normalize = (item, source) => {
     const id = item.id || item.slug || item._id || `${source}-${Math.random().toString(36).slice(2,9)}`;
-    const title = item.name || item.title || item.job_title || '';
+    const title = item.name || item.title || item.job_title || item.jobTitle || item.jobTitle || '';
     // Robust company extraction: handle Adzuna / Muse / Indeed shapes and Rise's owner.companyName
     const company = (function() {
       try {
@@ -49,21 +52,21 @@ export default async function handler(req, res) {
           if (item.owner.companyName) return item.owner.companyName;
           if (item.owner.name) return item.owner.name;
         }
-        return item.company || item.organisation || item.organization || '';
+        return item.company || item.companyName || item.organisation || item.organization || '';
       } catch (e) { return '' }
     })();
 
-    const location = (item.location && (item.location.display_name || item.location.name)) || (Array.isArray(item.locations) ? item.locations.map(l=>l.name || l).join(', ') : (item.location || item.locationAddress || item.location_address || ''));
+    const location = (item.location && (item.location.display_name || item.location.name)) || (Array.isArray(item.locations) ? item.locations.map(l=>l.name || l).join(', ') : (item.location || item.locationAddress || item.location_address || item.jobGeo || ''));
 
     const url = item.refs?.landing_page || item.refs?.api || item.redirect_url || item.url || item.location_url || item.source_url || '';
 
-    const description = item.contents || item.description || item.summary || item.snippet || (item.descriptionBreakdown && item.descriptionBreakdown.oneSentenceJobSummary) || (Array.isArray(item.skills_suggest) ? item.skills_suggest.join('\n') : '') || '';
+    const description = item.contents || item.description || item.jobDescription || item.summary || item.snippet || (item.descriptionBreakdown && item.descriptionBreakdown.oneSentenceJobSummary) || (Array.isArray(item.skills_suggest) ? item.skills_suggest.join('\n') : '') || '';
 
     // salary resolver
     const salary = (function() {
       try {
-        const smin = item.salary_min || item.salaryMin || item.min_salary || (item.salary && (item.salary.from || item.salary.min));
-        const smax = item.salary_max || item.salaryMax || item.max_salary || (item.salary && (item.salary.to || item.salary.max));
+        const smin = item.salary_min || item.salaryMin || item.salaryMin || item.min_salary || (item.salary && (item.salary.from || item.salary.min));
+        const smax = item.salary_max || item.salaryMax || item.salaryMax || item.max_salary || (item.salary && (item.salary.to || item.salary.max));
         const rmin = item.descriptionBreakdown && (item.descriptionBreakdown.salaryRangeMinYearly || item.descriptionBreakdown.salaryRangeMin);
         const rmax = item.descriptionBreakdown && (item.descriptionBreakdown.salaryRangeMaxYearly || item.descriptionBreakdown.salaryRangeMax);
         if (smin || smax) {
@@ -90,7 +93,7 @@ export default async function handler(req, res) {
       return undefined;
     })();
 
-    const postedAt = item.postedAt || item.date_posted || item.created_at || item.createdAt || item.created || item.posted || item.publication_date || '';
+    const postedAt = item.postedAt || item.pubDate || item.date_posted || item.created_at || item.createdAt || item.created || item.posted || item.publication_date || '';
 
     return {
       id,
@@ -124,20 +127,48 @@ export default async function handler(req, res) {
     const providerErrors = {};
 
     // Helper to send successful JSON responses with observability fields
-    const sendOk = (providerName, payload) => {
-      const body = { provider: providerName, providersAttempted, providerErrors };
-      if (payload && payload.raw) body.raw = payload.raw;
-      else body.jobs = payload || [];
-      try {
-        // include a small ATS preview when available to help UI validation
-        if (typeof atsResults !== 'undefined' && Array.isArray(atsResults) && atsResults.length) {
-          body.atsPreview = atsResults.slice(0, 3);
+      const sendOk = (providerName, payload, meta = {}) => {
+        const body = { provider: providerName, providersAttempted, providerErrors };
+        // normalize payload into jobs array when possible
+        let jobsArray = [];
+        if (payload && payload.raw) {
+          body.raw = payload.raw;
+          // if provider returned raw but also had jobs array, include for distribution
+          jobsArray = payload.raw.jobs || payload.raw.results || [];
+        } else {
+          jobsArray = Array.isArray(payload) ? payload : (payload && payload.jobs ? payload.jobs : []);
+          body.jobs = jobsArray || [];
         }
-      } catch (e) {
-        // ignore preview failures
-      }
-      return res.status(200).json(body);
-    };
+
+        // compute a simple distribution of jobs by source/provider to help frontend observability
+        try {
+          const dist = {};
+          for (const it of (jobsArray || [])) {
+            const src = (it && (it.source || it.provider || (it.raw && it.raw.source) || it.raw && it.raw.provider)) || 'unknown';
+            dist[src] = (dist[src] || 0) + 1;
+          }
+          body.providerDistribution = dist;
+        } catch (e) {
+          // ignore distribution failures
+        }
+
+        // include a small ATS preview when available to help UI validation
+        try {
+          if (typeof atsResults !== 'undefined' && Array.isArray(atsResults) && atsResults.length) {
+            body.atsPreview = atsResults.slice(0, 3);
+          }
+        } catch (e) {
+          // ignore preview failures
+        }
+
+        // merge any meta into the body for extra debug info
+        try {
+          if (meta && typeof meta === 'object') Object.assign(body, meta);
+        } catch (e) {}
+
+        console.log('sendOk response', { providerName, providersAttempted, providerErrors, providerDistribution: body.providerDistribution });
+        return res.status(200).json(body);
+      };
 
     // Pre-fetch ATS aggregator results (if available) so we can merge them later.
     let atsResults = [];
@@ -188,6 +219,137 @@ export default async function handler(req, res) {
     };
     // Start Rise fetch in parallel so results can be merged into provider responses.
     const risePromise = fetchRise(q);
+    // Helper to fetch Remotive public jobs and normalize them.
+    const fetchRemotive = async (queryText) => {
+      const cacheKey = `remotive:${queryText || ''}`;
+      try {
+        const url = `${REMOTIVE_BASE}?search=${encodeURIComponent(queryText || '')}`;
+        console.log('Calling Remotive helper', { url: url.replace(/(search=)[^&]+/, '$1REDACTED') });
+        const r = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!r.ok) {
+          console.warn('Remotive helper non-OK', { status: r.status });
+          return [];
+        }
+        const json = await r.json().catch(() => null);
+        const items = (json && (json.jobs || json.results)) || [];
+        const normalized = (Array.isArray(items) ? items : []).map(i => normalize(i, 'remotive'));
+        console.log('Remotive helper returned', { count: normalized.length });
+        return normalized;
+      } catch (e) {
+        console.warn('Remotive helper failed', String(e).slice(0,200));
+        return [];
+      }
+    };
+    // Start Remotive fetch in parallel so it can be merged into combined responses.
+    const remotivePromise = fetchRemotive(q);
+
+    // Helper to fetch Jobicy public remote jobs and normalize them.
+    const fetchJobicy = async (queryText) => {
+      const cacheKey = `jobicy:${queryText || ''}`;
+      const cached = JOBICY_CACHE.get(cacheKey);
+      if (cached && (Date.now() - cached.ts) < JOBICY_TTL) return cached.data;
+      try {
+        const count = 20;
+        const params = new URLSearchParams();
+        params.set('count', String(count));
+        if (queryText) params.set('tag', queryText);
+        const url = `${JOBICY_BASE}?${params.toString()}`;
+        console.log('Calling Jobicy helper', { url: url.replace(/(tag=)[^&]+/, '$1REDACTED') });
+        const r = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!r.ok) {
+          console.warn('Jobicy helper non-OK', { status: r.status });
+          return [];
+        }
+        const json = await r.json().catch(() => null);
+        const items = (json && (json.jobs || json.results || json.data)) || [];
+        const normalized = (Array.isArray(items) ? items : []).map(i => normalize(i, 'jobicy'));
+        JOBICY_CACHE.set(cacheKey, { ts: Date.now(), data: normalized });
+        console.log('Jobicy helper returned', { count: normalized.length });
+        return normalized;
+      } catch (e) {
+        console.warn('Jobicy helper failed', String(e).slice(0,200));
+        return [];
+      }
+    };
+    // Start Jobicy fetch in parallel so it can be merged into combined responses.
+    const jobicyPromise = fetchJobicy(q);
+
+    // If caller requested a specific provider override (e.g. `?provider=remotive`),
+    // honor it by fetching that provider and returning its results directly.
+    if (OVERRIDE_PROVIDER) {
+      try {
+        const prov = OVERRIDE_PROVIDER;
+        console.log('Provider override requested', { prov, q });
+        if (prov === 'remotive') {
+          providersAttempted.push('remotive');
+          const remUrlO = `${REMOTIVE_BASE}?search=${encodeURIComponent(q)}`;
+          console.log('PROVIDER_OVERRIDE: Calling Remotive', { remUrlO });
+          const rr = await fetch(remUrlO);
+          console.log('PROVIDER_OVERRIDE: Remotive response', { status: rr.status, ok: rr.ok });
+          if (!rr.ok) {
+            const txt = await rr.text().catch(() => '');
+            providerErrors.remotive = `non-ok ${rr.status}: ${(txt || '').slice(0,200)}`;
+            console.warn('PROVIDER_OVERRIDE: Remotive non-OK', { status: rr.status, preview: (txt || '').slice(0,200) });
+            return res.status(502).json({ error: 'Remotive override failed', providersAttempted, providerErrors });
+          }
+          const rjson = await rr.json().catch(() => null);
+          const items = rjson?.jobs || rjson?.results || [];
+          console.log('PROVIDER_OVERRIDE: Remotive returned', { count: Array.isArray(items) ? items.length : 0 });
+          const remNormalizedO = (items || []).map(i => normalize(i, 'remotive'));
+          try { riseResults = await risePromise.catch(() => []); } catch (e) {}
+          const remMergedO = mergeWithRiseAndATS(remNormalizedO);
+          try {
+            // Log detailed debug info: counts and sample sources so we can see whether
+            // remotive items were present before/after merging.
+            const sampleSources = (remNormalizedO || []).slice(0,5).map(it => it && (it.source || it.raw && it.raw.source) || 'unknown');
+            const beforeCount = Array.isArray(remNormalizedO) ? remNormalizedO.length : 0;
+            const afterCount = Array.isArray(remMergedO) ? remMergedO.length : 0;
+            const dist = {};
+            for (const it of (remMergedO || [])) {
+              const src = (it && (it.source || it.provider || (it.raw && it.raw.source))) || 'unknown';
+              dist[src] = (dist[src] || 0) + 1;
+            }
+            console.log('PROVIDER_OVERRIDE: Remotive debug', { q, beforeCount, afterCount, sampleSources, mergedDistribution: dist });
+          } catch (e) { console.warn('PROVIDER_OVERRIDE: debug logging failed', String(e).slice(0,200)); }
+          // TEMP DEBUG: return the raw normalized Remotive items (bypass merge/dedupe)
+          // This helps verify Remotive results are actually fetched and reach the client.
+          return sendOk('remotive', remNormalizedO, { override: 'remotive', beforeCount: (remNormalizedO || []).length, afterCount: (remMergedO || []).length, sampleSources: (remNormalizedO || []).slice(0,5).map(it => it && it.source || 'unknown') });
+        }
+        if (prov === 'jobicy') {
+          providersAttempted.push('jobicy');
+          const jobUrlO = `${JOBICY_BASE}?count=20${q ? `&tag=${encodeURIComponent(q)}` : ''}`;
+          console.log('PROVIDER_OVERRIDE: Calling Jobicy', { jobUrlO });
+          const jr = await fetch(jobUrlO);
+          console.log('PROVIDER_OVERRIDE: Jobicy response', { status: jr.status, ok: jr.ok });
+          if (!jr.ok) {
+            const txt = await jr.text().catch(() => '');
+            providerErrors.jobicy = `non-ok ${jr.status}: ${(txt || '').slice(0,200)}`;
+            console.warn('PROVIDER_OVERRIDE: Jobicy non-OK', { status: jr.status, preview: (txt || '').slice(0,200) });
+            return res.status(502).json({ error: 'Jobicy override failed', providersAttempted, providerErrors });
+          }
+          const jjson = await jr.json().catch(() => null);
+          const itemsJ = jjson?.jobs || jjson?.results || jjson?.data || [];
+          console.log('PROVIDER_OVERRIDE: Jobicy returned', { count: Array.isArray(itemsJ) ? itemsJ.length : 0 });
+          const jobNormalizedO = (itemsJ || []).map(i => normalize(i, 'jobicy'));
+          try { riseResults = await risePromise.catch(() => []); } catch (e) {}
+          const jobMergedO = mergeWithRiseAndATS(jobNormalizedO);
+          try {
+            const sampleSources = (jobNormalizedO || []).slice(0,5).map(it => it && (it.source || it.raw && it.raw.source) || 'unknown');
+            const beforeCount = Array.isArray(jobNormalizedO) ? jobNormalizedO.length : 0;
+            const afterCount = Array.isArray(jobMergedO) ? jobMergedO.length : 0;
+            const dist = {};
+            for (const it of (jobMergedO || [])) {
+              const src = (it && (it.source || it.provider || (it.raw && it.raw.source))) || 'unknown';
+              dist[src] = (dist[src] || 0) + 1;
+            }
+            console.log('PROVIDER_OVERRIDE: Jobicy debug', { q, beforeCount, afterCount, sampleSources, mergedDistribution: dist });
+          } catch (e) { console.warn('PROVIDER_OVERRIDE: Jobicy debug failed', String(e).slice(0,200)); }
+          return sendOk('jobicy', jobNormalizedO, { override: 'jobicy', beforeCount: (jobNormalizedO || []).length, afterCount: (jobMergedO || []).length });
+        }
+      } catch (e) {
+        console.warn('Provider override handler failed', String(e).slice(0,200));
+      }
+    }
     // Helper to merge ATS results with a provider's jobs (ATS first, deduped)
     const mergeWithATS = (jobsArray) => {
       const seen = new Set();
@@ -620,10 +782,18 @@ export default async function handler(req, res) {
 
               // Interleave Muse + Adzuna (and Rise) to improve distribution
               try { riseResults = await risePromise.catch(() => []); } catch (e) {}
+              // include remotive results when available
+              let remResultsForMA = [];
+              try { remResultsForMA = await remotivePromise.catch(() => []); } catch (e) { remResultsForMA = []; }
+              // include jobicy results when available
+              let jobicyResultsForMA = [];
+              try { jobicyResultsForMA = await jobicyPromise.catch(() => []); } catch (e) { jobicyResultsForMA = []; }
               const providersMapMA = {
                 muse: museNormalized || [],
                 adzuna: adzNormalized || [],
               };
+              if (Array.isArray(remResultsForMA) && remResultsForMA.length) providersMapMA.remotive = remResultsForMA;
+              if (Array.isArray(jobicyResultsForMA) && jobicyResultsForMA.length) providersMapMA.jobicy = jobicyResultsForMA;
               if (Array.isArray(riseResults) && riseResults.length) providersMapMA.rise = riseResults;
               const mergedMA = mergeProvidersInterleaved(providersMapMA, { perProviderCap: 6, totalLimit: 50 });
               return sendOk('combined', mergedMA);
@@ -687,11 +857,19 @@ export default async function handler(req, res) {
               }
               // Interleave Rise + Indeed + Adzuna to avoid single-provider dominance
               try { riseResults = await risePromise.catch(() => []); } catch (e) {}
+              // include remotive results when available
+              let remResultsFor2 = [];
+              try { remResultsFor2 = await remotivePromise.catch(() => []); } catch (e) { remResultsFor2 = []; }
+              // include jobicy results when available
+              let jobicyResultsFor2 = [];
+              try { jobicyResultsFor2 = await jobicyPromise.catch(() => []); } catch (e) { jobicyResultsFor2 = []; }
               const providersMap2 = {
                 rise: Array.isArray(riseResults) ? riseResults : [],
                 indeed: indeedResults || [],
                 adzuna: adzNormalized || [],
               };
+              if (Array.isArray(remResultsFor2) && remResultsFor2.length) providersMap2.remotive = remResultsFor2;
+              if (Array.isArray(jobicyResultsFor2) && jobicyResultsFor2.length) providersMap2.jobicy = jobicyResultsFor2;
               const mergedInter = mergeProvidersInterleaved(providersMap2, { perProviderCap: 6, totalLimit: 50 });
               console.log('Returning interleaved Indeed+Adzuna', { indeed: (indeedResults || []).length, adzuna: (adzNormalized || []).length, merged: mergedInter.length });
               return sendOk('combined', mergedInter);
@@ -714,20 +892,28 @@ export default async function handler(req, res) {
 
     // Fallback to Remotive public API
     const remUrl = `${REMOTIVE_BASE}?search=${encodeURIComponent(q)}`;
-    console.log('Calling Remotive', { remUrl });
+    console.log('PROVIDER_CALL: Remotive start', { remUrl, q });
     const r2 = await fetch(remUrl);
-    console.log('Remotive response', { status: r2.status, ok: r2.ok });
+    console.log('PROVIDER_CALL: Remotive response', { status: r2.status, ok: r2.ok });
     if (r2.ok) {
-      const json = await r2.json();
+      let json = null;
+      try {
+        json = await r2.json();
+      } catch (e) {
+        console.warn('Remotive JSON parse failed', String(e).slice(0,200));
+      }
       if (query.raw === '1') {
+        providersAttempted.push('remotive');
+        console.log('PROVIDER_CALL: Remotive raw payload returned', { q, provider: 'remotive', jobsCount: (json && (json.jobs || json.results) ? (json.jobs || json.results).length : 0) });
         return sendOk('remotive', { raw: json });
       }
-      const items = json.jobs || json.results || [];
+      const items = json?.jobs || json?.results || [];
       console.log(`Remotive returned ${Array.isArray(items) ? items.length : 0} items`);
       providersAttempted.push('remotive');
       const remNormalized = (items || []).map(i => normalize(i, 'remotive'));
       try { riseResults = await risePromise.catch(() => []); } catch (e) {}
       const remMerged = mergeWithRiseAndATS(remNormalized);
+      console.log('PROVIDER_CALL: Remotive merged and returning', { q, remMergedCount: Array.isArray(remMerged) ? remMerged.length : 0 });
       return sendOk('remotive', remMerged);
     } else {
       const text = await r2.text().catch(() => '');
